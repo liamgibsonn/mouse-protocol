@@ -13,6 +13,8 @@ import {
   NINJUTSO_VENDOR_ID,
 } from "@openmouse/protocol/ninjutso";
 
+import { MSI_PRODUCT_ID } from "@openmouse/protocol/msi";
+
 export const VENDOR_ID = {
   pulsar: 0x3710,
   endgameGear: 0x3367,
@@ -27,6 +29,7 @@ export const VENDOR_ID = {
   finalmouse: 0x361d,
   keychron: 0x3434,
   moddo: 0x2fe3,
+  msi: 0x0db0,
   ninjutsoLegacy: NINJUTSO_LEGACY_VENDOR_ID,
   ninjutso: NINJUTSO_VENDOR_ID,
 } as const;
@@ -44,6 +47,14 @@ export const KEYCHRON_HID_FILTERS: HIDDeviceFilter[] = KEYCHRON_PRODUCT_IDS.map(
 export const MODDO_HID_FILTERS: HIDDeviceFilter[] = [
   { vendorId: VENDOR_ID.moddo, usagePage: 0xff, usage: 0x01 },
   { vendorId: VENDOR_ID.moddo, usagePage: 0xff, usage: 0x02 },
+];
+
+// MSI Clutch GM41. The vendor config interface's usagePage/usage has not
+// been confirmed on hardware yet (see the note in drivers/msi/hid.ts), so
+// this filters on product id alone for now — broader than ideal, but safe,
+// since MSI_PRODUCT_ID is a confirmed value.
+export const MSI_HID_FILTERS: HIDDeviceFilter[] = [
+  { vendorId: VENDOR_ID.msi, productId: MSI_PRODUCT_ID },
 ];
 
 // Viper V2/V3 Pro expose their control channel as a Generic Desktop Mouse
@@ -208,6 +219,7 @@ export const SUPPORTED_HID_FILTERS: HIDDeviceFilter[] = [
   ...RAZER_DEATHADDER_V2_FILTERS,
   ...EGG_WE_HID_FILTERS,
   ...MODDO_HID_FILTERS,
+  ...MSI_HID_FILTERS,
   ...[...NINJUTSO_LEGACY_MOUSE_PRODUCT_IDS, ...NINJUTSO_LEGACY_RECEIVER_PRODUCT_IDS]
     .map((productId) => ({ vendorId: NINJUTSO_LEGACY_VENDOR_ID, productId })),
   ...[...NINJUTSO_MOUSE_PRODUCT_IDS, ...NINJUTSO_RECEIVER_PRODUCT_IDS]

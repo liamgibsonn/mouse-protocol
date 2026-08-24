@@ -29,6 +29,10 @@
       "types": "./dist/finalmouse/index.d.ts",
       "import": "./dist/finalmouse/index.js"
     },
+    "./fantech": {
+      "types": "./dist/fantech/index.d.ts",
+      "import": "./dist/fantech/index.js"
+    },
     "./keychron": {
       "types": "./dist/keychron/index.d.ts",
       "import": "./dist/keychron/index.js"
@@ -81,9 +85,21 @@
       "types": "./dist/vgn/index.d.ts",
       "import": "./dist/vgn/index.js"
     },
+    "./wallhack": {
+      "types": "./dist/wallhack/index.d.ts",
+      "import": "./dist/wallhack/index.js"
+    },
     "./wlmouse": {
       "types": "./dist/wlmouse/index.d.ts",
       "import": "./dist/wlmouse/index.js"
+    },
+    "./wooting": {
+      "types": "./dist/wooting/index.d.ts",
+      "import": "./dist/wooting/index.js"
+    },
+    "./zaunkoenig": {
+      "types": "./dist/zaunkoenig/index.d.ts",
+      "import": "./dist/zaunkoenig/index.js"
     },
     "./drivers": {
       "types": "./dist/drivers/index.d.ts",
@@ -92,6 +108,10 @@
     "./drivers/*": {
       "types": "./dist/drivers/*.d.ts",
       "import": "./dist/drivers/*.js"
+    },
+    "./gwolves": {
+      "types": "./dist/gwolves/index.d.ts",
+      "import": "./dist/gwolves/index.js"
     }
   },
   "scripts": {

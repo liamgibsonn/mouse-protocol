@@ -12,6 +12,7 @@ import {
   hidppErrorForRequest,
   hidppErrorMessage,
   isDirectConnection,
+  isDirectConnectProduct,
   OnboardOnlyError,
   withSoftwareId,
 } from "@openmouse/protocol/logitech";
@@ -25,6 +26,10 @@ import {
 
 const G402 = 0xc07e;
 const G403_HERO = 0xc08f;
+const G703 = 0xc087;
+const G502 = 0xc07d;
+const G502_X_PLUS = 0xc095;
+const G502_X = 0xc099;
 const LIGHTSPEED_RECEIVER = 0xc54d;
 const SUPERSTRIKE_USB = 0xc0a8;
 
@@ -42,6 +47,19 @@ test("runtime probing alone classifies direct and receiver connections", () => {
   assert.equal(isDirectConnection(DEVICE_INDEX_DIRECT), true);
   assert.equal(isDirectConnection(DEVICE_INDEX_RECEIVER), false);
   assert.equal(isDirectConnection(null), false);
+});
+
+test("the G502 family direct USB interfaces are recognized", () => {
+  assert.equal(isDirectConnectProduct(G502), true);
+  assert.equal(isDirectConnectProduct(G502_X_PLUS), true);
+  assert.equal(isDirectConnectProduct(G502_X), true);
+  assert.equal(isDirectConnectProduct(LIGHTSPEED_RECEIVER), false);
+});
+
+test("the G703 USB cable interface is recognized as direct-connect", () => {
+  assert.equal(isDirectConnectProduct(G703), true);
+  assert.equal(isDirectConnectProduct(G403_HERO), true);
+  assert.equal(isWiredHidppConnection(G703, { USB: "C087" }, false), true);
 });
 
 test("extended DPI does not imply lift-off or mode-status controls", () => {

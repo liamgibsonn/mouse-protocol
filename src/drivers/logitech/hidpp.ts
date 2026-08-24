@@ -1,4 +1,4 @@
-import type { MouseStatus } from "../mouse-types.ts";
+import type { MouseLighting, MouseStatus } from "../mouse-types.ts";
 import { LOGITECH_RECEIVER_PRODUCT_IDS } from "../vendors.ts";
 import {
   BOLT_INDEX_PROBE_TIMEOUT_MS,
@@ -10,6 +10,54 @@ import {
   resolveBoltReportDevice,
 } from "./bolt.ts";
 import {
+  LOGITECH_CHANGE_HOST,
+  LOGITECH_FRIENDLY_NAME,
+  LOGITECH_KEY_FLAG,
+  LOGITECH_REPROG_CONTROLS,
+  buildControlDiversionClearWrite,
+  buildControlRemapWrite,
+  decodeControlInfo,
+  decodeControlReporting,
+  logitechControlName,
+  logitechTaskName,
+  remappableControlTargets,
+  type LogitechControlInfo,
+  type LogitechReprogrammableControl,
+  LOGITECH_HAPTIC,
+  LOGITECH_HAPTIC_EFFECTS,
+  LOGITECH_HIRES_WHEEL,
+  LOGITECH_HIRES_WHEEL_BIT,
+  LOGITECH_HOSTS,
+  LOGITECH_SMART_SHIFT,
+  LOGITECH_SMART_SHIFT_OFF,
+  LOGITECH_THUMB_WHEEL,
+  buildFriendlyNameWrite,
+  buildRatchetControlWrite,
+  buildThumbWheelWrite,
+  decodeHiresWheelCapabilities,
+  decodeHiresWheelMode,
+  decodeRatchetControl,
+  decodeThumbWheelStatus,
+  decodeThumbWheelSupportsInvert,
+  encodeHiresWheelMode,
+  type LogitechRatchetControl,
+  type LogitechWheelMode,
+  buildHostSwitchWrite,
+  decodeFriendlyNameChunk,
+  decodeFriendlyNameLengths,
+  decodeFriendlyNameText,
+  decodeHostPaired,
+  decodeHostsInfo,
+  rejectFriendlyName,
+  rejectHostSwitch,
+  type LogitechHostsInfo,
+  buildHapticConfigWrite,
+  decodeHapticConfig,
+  encodeHapticFlags,
+  isLogitechHapticEffect,
+  isLogitechHapticIntensity,
+  type LogitechHapticConfig,
+  type LogitechHapticFlag,
   DEVICE_INDEX_DIRECT,
   decodeBatteryLevelState,
   decodeReportRateBitmap,
@@ -47,11 +95,17 @@ import {
   describeProfileFormat,
   dpiStageCapabilitiesForOptions,
   encodeDpiStages,
+  encodeButtonAssignment,
+  encodeMacroButtonAssignment,
+  encodeMacroSector,
   encodeProfileName,
   encodeReportRate,
   factoryProfileForFormat,
   validateDpiStagePlan,
   type DpiStagePlan,
+  type LogitechButtonAction,
+  type LogitechButtonBinding,
+  type LogitechMacroStep,
   layoutForFormat,
   parseDirectory,
   parseProfilesInfo,
@@ -64,6 +118,14 @@ import {
   type OnboardProfile,
   type ProfileFormatCapabilities,
 } from "./onboard-profiles.ts";
+import {
+  encodeLogitechRgbEffect,
+  encodeLogitechColorLedEffect,
+  logitechColorLedLighting,
+  logitechRgbLighting,
+  type LogitechColorLedZone,
+  type LogitechRgbZone,
+} from "./rgb-effects.ts";
 
 export type { OnboardProfile };
 
@@ -208,6 +270,12 @@ export function hasLiftOffControl(legacyDpi: boolean, lodByte: number | null): b
 const SHORT_REPORT_ID = 0x10;
 const LONG_REPORT_ID = 0x11;
 const REQUEST_TIMEOUT_MS = 6000;
+/**
+ * A host switch succeeds by disconnecting, so the usual request timeout would
+ * spend six seconds waiting for an answer that cannot arrive before concluding
+ * the command worked. Long enough for a device that stays to acknowledge.
+ */
+const HOST_SWITCH_ACK_TIMEOUT_MS = 1500;
 const FEATURE = {
   deviceName: 0x0005,
   firmware: 0x0003,
@@ -219,12 +287,23 @@ const FEATURE = {
   extendedDpi: 0x2202,
   extendedReportRate: 0x8061,
   modeStatus: 0x8090,
+  rgbEffects: 0x8071,
+  perKeyLightingV2: 0x8081,
+  colorLedEffects: 0x8070,
   // Legacy features used by HERO-era mice (e.g. G502 HERO / LIGHTSPEED,
   // Proteus). Queried only when the extended equivalents are absent.
   adjustableDpi: 0x2201,
   reportRate: 0x8060,
   onboardProfiles: 0x8100,
   analogButtons: 0x1b0c,
+  haptic: 0x19b0,
+  smartShift: 0x2111,
+  hiresWheel: 0x2121,
+  thumbWheel: 0x2150,
+  friendlyName: 0x0007,
+  hostsInfo: 0x1815,
+  changeHost: 0x1814,
+  reprogControls: 0x1b04,
 } as const;
 
 interface ResolvedFeature {
@@ -317,6 +396,11 @@ export class LogitechHidppClient {
   /** Lift-off levels this device advertised; the single source of truth for both UI and validation. */
   private lodCapabilities: ProfileFormatCapabilities = capabilitiesForFormat(null);
   private supportedLods: Array<NonNullable<LogitechMouseStatus["liftOffDistance"]>> = ["Medium", "High"];
+  private rgbZone: LogitechRgbZone | null = null;
+  private colorLedZones: LogitechColorLedZone[] = [];
+  private rgbLighting: MouseLighting | null = null;
+  private rgbClaimed = false;
+  private rgbOriginalMode: "Onboard" | "Host" | "Unknown" = "Unknown";
   private readonly rateChangeWaiters: Array<{ rate: number; resolve: () => void; reject: (reason: Error) => void }> = [];
   /**
    * Device used for HID++ feature sendReport. On Bolt this is the long-report
@@ -576,9 +660,10 @@ export class LogitechHidppClient {
     const dpiState = dpiFeature.legacy
       ? await this.readLegacyDpi(dpiFeature.index)
       : await this.readDpi(dpiFeature.index);
-    const supportsSeparateDpiAxes = dpiFeature.legacy
-      ? false
+    const dpiCapabilities = dpiFeature.legacy
+      ? { separateAxes: false, liftOff: false }
       : await this.readDpiCapabilities(dpiFeature.index);
+    const supportsSeparateDpiAxes = dpiCapabilities.separateAxes;
     // Productivity Bolt mice (MX Master 3S) expose DPI and battery but no
     // 0x8060/0x8061 report-rate feature. Skip rather than throwing.
     const supportedPollingRates = reportRateFeature.index
@@ -592,10 +677,15 @@ export class LogitechHidppClient {
         : await this.readPollingRate(reportRateFeature.index)
       : 0;
     const profileState = await this.readProfileState(profilesFeature.index);
+    this.rgbOriginalMode = profileState.deviceMode;
     const firmware = await this.readFirmware(firmwareFeature.index);
     const analogButtonTuning = analogButtonsFeature.index
       ? await this.readAnalogButtonTuning(analogButtonsFeature.index)
       : undefined;
+    const haptics = await this.readHapticConfig();
+    const friendly = await this.readFriendlyName();
+    const hosts = await this.readHostState();
+    const wheel = await this.readWheelState();
     const modeStatusFeature = await this.getFeature(FEATURE.modeStatus);
     const modeStatus = modeStatusFeature.index ? await this.readModeStatus(modeStatusFeature.index) : null;
     // One extra request; the layout it selects is worth surfacing in diagnostics.
@@ -608,6 +698,15 @@ export class LogitechHidppClient {
     // the same format gets the same limits without being named here.
     this.profileFormatId = onboardProfileFormat?.id ?? null;
     this.lodCapabilities = capabilitiesForFormat(onboardProfileFormat?.id);
+    if (dpiCapabilities.liftOff && ![7, 8].includes(onboardProfileFormat?.id ?? -1)) {
+      // Solaar's 0x2202 definition for G502 X-family firmware advertises LOD
+      // independently of profile format and numbers Low/Medium/High from zero.
+      this.lodCapabilities = {
+        ...this.lodCapabilities,
+        supportedLods: ["Low", "Medium", "High"],
+        lodEncoding: { Low: 0, Medium: 1, High: 2 },
+      };
+    }
     this.supportedLods = [...this.lodCapabilities.supportedLods];
     const wired = isWiredHidppConnection(this.device.productId, identity.transportIds, this.isDirectConnect);
     this.wiredConnection = wired;
@@ -619,7 +718,16 @@ export class LogitechHidppClient {
       && describeProfileFormat(this.profileFormatId).writable
       && capabilitiesForFormat(this.profileFormatId).reportRates !== null;
     const liftOffDistance = decodeLiftOffLevel(dpiState.lod, this.lodCapabilities);
-    const hasLiveLiftOffControl = supportsLiveLiftOffControl(dpiFeature.legacy, liftOffDistance);
+    const hasLiveLiftOffControl = !dpiFeature.legacy && dpiCapabilities.liftOff;
+    const rgbFeature = await this.getFeature(FEATURE.rgbEffects);
+    const colorLedFeature = await this.getFeature(FEATURE.colorLedEffects);
+    const effectZones = rgbFeature.index
+      ? [await this.readRgbLighting(rgbFeature.index)].filter((zone): zone is MouseLighting => zone !== null)
+      : colorLedFeature.index ? await this.readColorLedLighting(colorLedFeature.index) : [];
+    const perLedFeature = await this.getFeature(FEATURE.perKeyLightingV2);
+    const perLedZones = perLedFeature.index ? await this.readPerLedLighting(perLedFeature.index, name) : [];
+    const lightingZones = [...effectZones, ...perLedZones];
+    const lighting = lightingZones[0] ?? null;
     const rateLimits = this.lodCapabilities.reportRates;
     const connectionRateCeiling = rateLimits
       ? (wired ? rateLimits.wiredMaxHz : rateLimits.wirelessMaxHz)
@@ -662,12 +770,23 @@ export class LogitechHidppClient {
       // Surface Auto and LightForce Optical. Only expose that control bank when
       // the sensor positively reports the related live LOD capability; this is
       // deliberately conservative and avoids a product/model exception.
+      ...wheel,
+      friendlyName: friendly?.name ?? null,
+      friendlyNameMaxLength: friendly?.maxLength ?? null,
+      hostCount: hosts?.info.hostCount ?? null,
+      currentHost: hosts?.info.currentHost ?? null,
+      hostSlotsPaired: hosts?.paired ?? null,
+      hapticIntensity: haptics?.intensity ?? null,
+      hapticEnabled: haptics?.enabled ?? null,
+      hapticBatterySaving: haptics?.batterySaving ?? null,
       gamingSurfaceMode: modeStatus === null || !hasLiveLiftOffControl
         ? null
         : decodeModeStatus(modeStatus, MODE_STATUS.gamingSurface),
       lightforceSwitchMode: modeStatus === null || !hasLiveLiftOffControl
         ? null
         : decodeModeStatus(modeStatus, MODE_STATUS.lightforce),
+      lighting: lighting ?? undefined,
+      lightingZones: lightingZones.length ? lightingZones : undefined,
       // Some profile formats have different wired and wireless ceilings. The
       // active transport comes from HID++ identity rather than a USB PID.
       pollingRateHz: connectionRateCeiling ? Math.min(pollingRateHz, connectionRateCeiling) : pollingRateHz,
@@ -697,6 +816,12 @@ export class LogitechHidppClient {
   }
 
   async close(): Promise<void> {
+    if (this.rgbClaimed) {
+      const rgb = await this.getFeature(FEATURE.rgbEffects).catch(() => ({ index: 0, version: 0 }));
+      if (rgb.index) await this.request(rgb.index, 0x50, 0x01, 0x00, 0x00).catch(() => undefined);
+      if (this.rgbOriginalMode === "Onboard") await this.setOnboardMode("Onboard").catch(() => undefined);
+      this.rgbClaimed = false;
+    }
     for (const device of this.listeningDevices) {
       device.removeEventListener("inputreport", this.onInputReport);
       if (device.opened) {
@@ -705,6 +830,105 @@ export class LogitechHidppClient {
     }
     this.listeningDevices.clear();
     this.ioDevice = null;
+    // A device can come back on a different slot, or be a different mouse
+    // entirely, so nothing read this session survives the disconnect.
+    this.hostStateCache = undefined;
+    this.controlInfoCache = undefined;
+    this.friendlyNameCache = undefined;
+    this.wheelCapabilityCache = undefined;
+    this.rgbZone = null;
+    this.colorLedZones = [];
+    this.rgbLighting = null;
+  }
+
+  async setLighting(lighting: MouseLighting): Promise<MouseLighting> {
+    if (lighting.hardwareZoneId !== undefined) {
+      const feature = await this.getFeature(FEATURE.perKeyLightingV2);
+      if (!feature.index) throw new Error("This mouse does not expose per-LED lighting controls.");
+      const effects = await this.getFeature(FEATURE.rgbEffects);
+      if (effects.index && !this.rgbClaimed) {
+        const profiles = await this.getFeature(FEATURE.onboardProfiles);
+        if (profiles.index) await this.setOnboardMode("Host");
+        await this.request(effects.index, 0x50, 0x01, 0x03, 0x04);
+        if (!this.rgbZone) await this.readRgbLighting(effects.index);
+        // Disable the autonomous effect engine before painting individual
+        // cells. This is the G502 X PLUS prep sequence tested by Solaar.
+        await this.requestLong(effects.index, 0x10, [
+          0xff,
+          this.rgbZone?.effects.length ?? 0,
+          0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+          0x01,
+        ]);
+        this.rgbClaimed = true;
+      }
+      const color = Number.parseInt((lighting.color ?? "#000000").slice(1), 16);
+      const enabledColor = lighting.mode === "Off" ? 0 : color;
+      await this.requestLong(feature.index, 0x10, [
+        lighting.hardwareZoneId,
+        (enabledColor >> 16) & 0xff,
+        (enabledColor >> 8) & 0xff,
+        enabledColor & 0xff,
+      ]);
+      await this.request(feature.index, 0x70, 0x00);
+      return { ...lighting, mode: lighting.mode === "Off" ? "Off" : "Static", writeOnly: true };
+    }
+    const colorFeature = await this.getFeature(FEATURE.colorLedEffects);
+    const colorZone = this.colorLedZones.find((zone) => (logitechColorLedLighting(zone)?.zone) === lighting.zone);
+    if (colorFeature.index && colorZone) {
+      const payload = encodeLogitechColorLedEffect(colorZone, lighting);
+      if (!payload) throw new Error("That lighting effect was not advertised for this zone.");
+      await this.requestLong(colorFeature.index, 0x30, payload);
+      return { ...lighting, writeOnly: !colorZone.readable };
+    }
+    const feature = await this.getFeature(FEATURE.rgbEffects);
+    if (!feature.index) throw new Error("This mouse does not expose RGB Effects controls.");
+    if (!this.rgbZone) await this.readRgbLighting(feature.index);
+    if (!this.rgbZone || lighting.zone !== this.rgbLighting?.zone) {
+      throw new Error(`This mouse has no \"${lighting.zone}\" lighting zone.`);
+    }
+    const payload = encodeLogitechRgbEffect(this.rgbZone, lighting);
+    if (!payload) throw new Error("That RGB effect was not advertised by this mouse.");
+    if (!this.rgbClaimed) {
+      const profiles = await this.getFeature(FEATURE.onboardProfiles);
+      if (profiles.index) await this.setOnboardMode("Host");
+      // Solaar SetSWControl(set=1, software mode=3, monitor NVConfig=4).
+      await this.request(feature.index, 0x50, 0x01, 0x03, 0x04);
+      this.rgbClaimed = true;
+    }
+    await this.requestLong(feature.index, 0x10, payload);
+    this.rgbLighting = { ...lighting };
+    return this.rgbLighting;
+  }
+
+  private async readColorLedLighting(featureIndex: number): Promise<MouseLighting[]> {
+    const info = await this.request(featureIndex, 0x00);
+    const count = Math.min(info[3] ?? 0, 8);
+    const readable = ((((info[6] ?? 0) << 8) | (info[7] ?? 0)) & 1) !== 0;
+    this.colorLedZones = [];
+    const lighting: MouseLighting[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const zoneReply = await this.request(featureIndex, 0x10, index, 0xff, 0x00);
+      const zone: LogitechColorLedZone = {
+        index,
+        location: ((zoneReply[4] ?? 0) << 8) | (zoneReply[5] ?? 0),
+        readable,
+        effects: [],
+      };
+      const effectCount = Math.min(zoneReply[6] ?? 0, 32);
+      for (let effectIndex = 0; effectIndex < effectCount; effectIndex += 1) {
+        const effect = await this.request(featureIndex, 0x20, index, effectIndex, 0x00);
+        zone.effects.push({
+          index: effect[4] ?? effectIndex,
+          id: ((effect[5] ?? 0) << 8) | (effect[6] ?? 0),
+          period: ((effect[9] ?? 0) << 8) | (effect[10] ?? 0),
+        });
+      }
+      this.colorLedZones.push(zone);
+      const current = readable ? await this.request(featureIndex, 0xe0, index).catch(() => null) : null;
+      const mapped = logitechColorLedLighting(zone, current ? [...current.slice(4, 15)] : undefined);
+      if (mapped) lighting.push(mapped);
+    }
+    return lighting;
   }
 
   async setPollingRate(pollingRateHz: number): Promise<number> {
@@ -1098,11 +1322,57 @@ export class LogitechHidppClient {
     reportRateWirelessHz?: number | null;
     reportRateWiredHz?: number | null;
     name?: string | null;
+    buttonAssignments?: Array<{ layer: "primary" | "g-shift"; button: number; binding: LogitechButtonAction | LogitechButtonBinding }>;
+    buttonMacros?: Array<{ layer: "primary" | "g-shift"; button: number; steps: LogitechMacroStep[] }>;
     /** Defaults to the running profile when omitted. */
     sector?: number;
   }): Promise<void> {
     const { featureIndex, sector, sectorSize, formatId, profile } = await this.openActiveProfile(values.sector);
     let updated: Uint8Array = profile.slice();
+    const macroBackups: Array<{ sector: number; bytes: Uint8Array }> = [];
+
+    for (const macro of values.buttonMacros ?? []) {
+      const info = parseProfilesInfo(await this.request(featureIndex, PROFILE_FN.getInfo));
+      if (info.macroFormatId === 0) throw new Error("This mouse does not advertise onboard macro storage.");
+      const directoryBytes = await this.readProfileSector(featureIndex, 0, Math.min(sectorSize, 64));
+      const profileSectors = new Set(parseDirectory(directoryBytes).map((entry) => entry.sector));
+      const referenced = new Set<number>();
+      for (const profileSector of profileSectors) {
+        const raw = await this.readProfileSector(featureIndex, profileSector, sectorSize);
+        const decoded = decodeOnboardProfile(raw, formatId, { sector: profileSector, enabled: true }, false);
+        for (const assignment of [...decoded.buttonAssignments, ...decoded.gShiftAssignments]) {
+          if (assignment.raw[0] === 0x00 && assignment.raw[2] > 0) referenced.add(assignment.raw[2]);
+        }
+      }
+      const currentAssignments = macro.layer === "primary"
+        ? decodeOnboardProfile(updated, formatId, { sector, enabled: true }, false).buttonAssignments
+        : decodeOnboardProfile(updated, formatId, { sector, enabled: true }, false).gShiftAssignments;
+      const currentMacro = currentAssignments[macro.button]?.raw;
+      let macroSector = currentMacro?.[0] === 0x00 ? currentMacro[2] : undefined;
+      if (!macroSector) {
+        for (let candidate = info.profileCount + 1; candidate < info.sectorCount; candidate += 1) {
+          if (profileSectors.has(candidate) || referenced.has(candidate)) continue;
+          const bytes = await this.readProfileSector(featureIndex, candidate, sectorSize);
+          if (bytes.every((byte) => byte === 0xff) || bytes.every((byte, index) => byte === 0xff || (index === bytes.length - 1 && byte === 0x00))) {
+            macroSector = candidate;
+            break;
+          }
+        }
+      }
+      if (!macroSector) throw new Error("No free onboard macro sector is available.");
+      const backup = await this.readProfileSector(featureIndex, macroSector, sectorSize);
+      const encoded = encodeMacroSector(sectorSize, macro.steps);
+      try {
+        await this.writeProfileSector(featureIndex, macroSector, encoded);
+        const confirmed = await this.readProfileSector(featureIndex, macroSector, sectorSize);
+        if (!confirmed.every((byte, index) => byte === encoded[index])) throw new Error("The mouse did not store the macro as written.");
+        macroBackups.push({ sector: macroSector, bytes: backup });
+        updated = encodeMacroButtonAssignment(updated, formatId, macro.layer, macro.button, macroSector);
+      } catch (error) {
+        await this.writeProfileSector(featureIndex, macroSector, backup).catch(() => undefined);
+        throw error;
+      }
+    }
 
     if (values.bunnyHoppingMs !== null && values.bunnyHoppingMs !== undefined) {
       const invalid = validateBunnyHoppingMs(values.bunnyHoppingMs);
@@ -1167,16 +1437,29 @@ export class LogitechHidppClient {
     if (values.name !== null && values.name !== undefined) {
       updated = encodeProfileName(updated, formatId, values.name);
     }
+    for (const assignment of values.buttonAssignments ?? []) {
+      updated = encodeButtonAssignment(updated, formatId, assignment.layer, assignment.button, assignment.binding);
+    }
 
     applyCrc(updated);
     // Encoding is deterministic, so an identical result means nothing changed
     // and the write cycle can be skipped entirely.
     if (updated.every((byte, index) => byte === profile[index])) return;
 
-    await this.writeProfileSector(featureIndex, sector, updated);
-    const confirmed = await this.readProfileSector(featureIndex, sector, sectorSize);
-    if (!confirmed.every((byte, index) => byte === updated[index])) {
-      throw new Error("The mouse did not store the profile as written.");
+    try {
+      await this.writeProfileSector(featureIndex, sector, updated);
+      const confirmed = await this.readProfileSector(featureIndex, sector, sectorSize);
+      if (!confirmed.every((byte, index) => byte === updated[index])) {
+        throw new Error("The mouse did not store the profile as written.");
+      }
+    } catch (error) {
+      // The profile sector is the pointer to the macro. Restore it first so an
+      // interrupted commit cannot leave a corrupt or half-linked assignment.
+      await this.writeProfileSector(featureIndex, sector, profile).catch(() => undefined);
+      for (const backup of macroBackups) {
+        await this.writeProfileSector(featureIndex, backup.sector, backup.bytes).catch(() => undefined);
+      }
+      throw error;
     }
   }
 
@@ -1500,7 +1783,9 @@ export class LogitechHidppClient {
     const feature = await this.getFeature(FEATURE.onboardProfiles);
     if (!feature.index) return [];
 
-    const info = parseProfilesInfo(await this.request(feature.index, PROFILE_FN.getInfo));
+    const infoReply = await this.request(feature.index, PROFILE_FN.getInfo);
+    const info = parseProfilesInfo(infoReply);
+    const buttonCount = Math.min(infoReply[8] ?? 0, 16);
     if (!info.profileFormatId) return [];
 
     const active = await this.request(feature.index, PROFILE_FN.getCurrentProfile);
@@ -1511,7 +1796,12 @@ export class LogitechHidppClient {
     const profiles: OnboardProfile[] = [];
     for (const entry of directory) {
       const bytes = await this.readProfileSector(feature.index, entry.sector, sectorSize);
-      profiles.push(decodeOnboardProfile(bytes, info.profileFormatId, entry, entry.sector === currentSector));
+      const profile = decodeOnboardProfile(bytes, info.profileFormatId, entry, entry.sector === currentSector);
+      if (buttonCount > 0) {
+        profile.buttonAssignments = profile.buttonAssignments.slice(0, buttonCount);
+        profile.gShiftAssignments = profile.gShiftAssignments.slice(0, buttonCount);
+      }
+      profiles.push(profile);
     }
     return profiles;
   }
@@ -1691,6 +1981,533 @@ export class LogitechHidppClient {
       await readChunk(length - 16);
     }
     return buffer;
+  }
+
+  /**
+   * Haptic configuration, or null on a device without feature 0x19B0. Only the
+   * MX Master 4 is known to carry it.
+   */
+  private async readHapticConfig(): Promise<LogitechHapticConfig | null> {
+    const feature = await this.getFeature(FEATURE.haptic);
+    if (!feature.index) return null;
+    const reply = await this.request(feature.index, LOGITECH_HAPTIC.get).catch(() => null);
+    return reply ? decodeHapticConfig(reply.slice(3)) : null;
+  }
+
+  /**
+   * Read-modify-write of the two-byte pair, then verify. Both fields share the
+   * write, so a caller changing one has to supply the other exactly as the
+   * device reports it, and bits 2-7 of the flag byte ride through untouched.
+   */
+  private async writeHapticConfig(change: {
+    flag?: { name: LogitechHapticFlag; on: boolean };
+    intensity?: number;
+  }): Promise<LogitechHapticConfig> {
+    const feature = await this.getFeature(FEATURE.haptic);
+    if (!feature.index) throw new Error("This mouse has no haptic feature.");
+
+    const current = decodeHapticConfig((await this.request(feature.index, LOGITECH_HAPTIC.get)).slice(3));
+    if (!current) throw new Error("The mouse gave no answer when its haptic settings were read.");
+
+    const flagByte = change.flag
+      ? encodeHapticFlags(current.flagByte, change.flag.name, change.flag.on)
+      : current.flagByte;
+    const intensity = change.intensity ?? current.intensity;
+
+    const reply = await this.request(
+      feature.index,
+      LOGITECH_HAPTIC.set,
+      ...buildHapticConfigWrite(flagByte, intensity),
+    );
+    const confirmed = decodeHapticConfig(reply.slice(3));
+    if (!confirmed) throw new Error("The mouse gave no answer to the haptic write.");
+    return confirmed;
+  }
+
+  /**
+   * Scroll-wheel state across 0x2111, 0x2121 and 0x2150. Every field stays
+   * absent rather than guessed when its feature is missing, so a mouse
+   * without a thumb wheel does not get a control that can only fail.
+   */
+  private async readWheelState(): Promise<{
+    wheelMode: LogitechWheelMode | null;
+    smartShiftThreshold: number | null;
+    hiResScroll: boolean | null;
+    invertScroll: boolean | null;
+    supportsInvertScroll: boolean;
+    wheelRatchetEngaged: boolean | null;
+    thumbWheelInverted: boolean | null;
+    supportsThumbWheelInvert: boolean;
+  }> {
+    const smartShift = await this.getFeature(FEATURE.smartShift);
+    const ratchetReply = smartShift.index
+      ? await this.request(smartShift.index, LOGITECH_SMART_SHIFT.get).catch(() => null)
+      : null;
+    const ratchet = ratchetReply ? decodeRatchetControl(ratchetReply.slice(3)) : null;
+
+    const wheel = await this.getFeature(FEATURE.hiresWheel);
+    let hiResScroll: boolean | null = null;
+    let invertScroll: boolean | null = null;
+    let supportsInvertScroll = this.wheelCapabilityCache?.supportsInvertScroll ?? false;
+    let wheelRatchetEngaged: boolean | null = null;
+    if (wheel.index) {
+      // Whether the wheel can invert is a property of the hardware, so it is
+      // read once rather than on every refresh.
+      if (this.wheelCapabilityCache === undefined) {
+        const capabilityReply = await this.request(wheel.index, LOGITECH_HIRES_WHEEL.capabilities).catch(() => null);
+        const capabilities = capabilityReply ? decodeHiresWheelCapabilities(capabilityReply.slice(3)) : null;
+        supportsInvertScroll = capabilities?.supportsInvert ?? false;
+      }
+
+      const modeReply = await this.request(wheel.index, LOGITECH_HIRES_WHEEL.get).catch(() => null);
+      if (modeReply) {
+        const mode = decodeHiresWheelMode(modeReply[3] ?? 0);
+        hiResScroll = mode.hiRes;
+        invertScroll = supportsInvertScroll ? mode.inverted : null;
+      }
+
+      const stateReply = await this.request(wheel.index, LOGITECH_HIRES_WHEEL.ratchetState).catch(() => null);
+      wheelRatchetEngaged = stateReply ? (stateReply[3] ?? 0) === 1 : null;
+    }
+
+    const thumb = await this.readThumbWheelState();
+    // Seeded once both halves have been read, so a refresh never asks again.
+    this.wheelCapabilityCache ??= {
+      supportsInvertScroll,
+      supportsThumbWheelInvert: thumb.supportsThumbWheelInvert,
+    };
+
+    return {
+      wheelMode: ratchet?.mode ?? null,
+      smartShiftThreshold: ratchet?.threshold ?? null,
+      hiResScroll,
+      invertScroll,
+      supportsInvertScroll,
+      wheelRatchetEngaged,
+      ...thumb,
+    };
+  }
+
+  private async readThumbWheelState(): Promise<{
+    thumbWheelInverted: boolean | null;
+    supportsThumbWheelInvert: boolean;
+  }> {
+    const feature = await this.getFeature(FEATURE.thumbWheel);
+    if (!feature.index) return { thumbWheelInverted: null, supportsThumbWheelInvert: false };
+
+    let supports = this.wheelCapabilityCache?.supportsThumbWheelInvert ?? false;
+    if (this.wheelCapabilityCache === undefined) {
+      const info = await this.request(feature.index, LOGITECH_THUMB_WHEEL.info).catch(() => null);
+      supports = info ? decodeThumbWheelSupportsInvert(info.slice(3)) === true : false;
+    }
+    const status = await this.request(feature.index, LOGITECH_THUMB_WHEEL.get).catch(() => null);
+    const decoded = status ? decodeThumbWheelStatus(status.slice(3)) : null;
+    return { thumbWheelInverted: decoded?.inverted ?? null, supportsThumbWheelInvert: supports };
+  }
+
+  /** 0x2111 carries all three bytes, so each setter changes only its field. */
+  private async writeRatchetControl(
+    change: { mode?: LogitechWheelMode; threshold?: number },
+  ): Promise<LogitechRatchetControl> {
+    const feature = await this.getFeature(FEATURE.smartShift);
+    if (!feature.index) throw new Error("This mouse has no SmartShift feature.");
+
+    const current = decodeRatchetControl((await this.request(feature.index, LOGITECH_SMART_SHIFT.get)).slice(3));
+    if (!current) throw new Error("The mouse gave no answer when its wheel settings were read.");
+
+    const reply = await this.request(
+      feature.index,
+      LOGITECH_SMART_SHIFT.set,
+      ...buildRatchetControlWrite(current, change),
+    );
+    const confirmed = decodeRatchetControl(reply.slice(3));
+    if (!confirmed) throw new Error("The mouse gave no answer to the wheel write.");
+    return confirmed;
+  }
+
+  async setWheelMode(mode: LogitechWheelMode): Promise<LogitechWheelMode> {
+    const confirmed = await this.writeRatchetControl({ mode });
+    if (confirmed.mode !== mode) throw new Error(`The mouse kept the wheel in ${confirmed.mode} mode.`);
+    return mode;
+  }
+
+  /** Passing null disables SmartShift; the ratchet mode is preserved either way. */
+  async setSmartShiftThreshold(threshold: number | null): Promise<number> {
+    const value = threshold === null ? LOGITECH_SMART_SHIFT_OFF : Math.round(threshold);
+    if (!Number.isInteger(value) || value < 0 || value > 0xff) {
+      throw new Error("A SmartShift threshold must be a whole number between 0 and 255.");
+    }
+    const confirmed = await this.writeRatchetControl({ threshold: value });
+    if (confirmed.threshold !== value) {
+      throw new Error(`The mouse kept a SmartShift threshold of ${confirmed.threshold}.`);
+    }
+    return confirmed.threshold;
+  }
+
+  /**
+   * Flips one bit of the 0x2121 mode byte. Diversion is read and carried
+   * through: setting it routes the wheel to HID++ and stops it scrolling, and
+   * clearing it would take that away from whatever set it.
+   */
+  private async writeWheelModeBit(bit: number, on: boolean): Promise<number> {
+    const feature = await this.getFeature(FEATURE.hiresWheel);
+    if (!feature.index) throw new Error("This mouse has no hi-resolution wheel feature.");
+
+    const current = (await this.request(feature.index, LOGITECH_HIRES_WHEEL.get))[3] ?? 0;
+    const reply = await this.request(
+      feature.index,
+      LOGITECH_HIRES_WHEEL.set,
+      encodeHiresWheelMode(current, bit, on),
+    );
+    return reply[3] ?? 0;
+  }
+
+  async setHiResScroll(enabled: boolean): Promise<boolean> {
+    const mode = decodeHiresWheelMode(await this.writeWheelModeBit(LOGITECH_HIRES_WHEEL_BIT.hiRes, enabled));
+    if (mode.hiRes !== enabled) throw new Error("The mouse kept its previous scrolling mode.");
+    return mode.hiRes;
+  }
+
+  async setInvertScroll(inverted: boolean): Promise<boolean> {
+    const mode = decodeHiresWheelMode(await this.writeWheelModeBit(LOGITECH_HIRES_WHEEL_BIT.invert, inverted));
+    if (mode.inverted !== inverted) throw new Error("The mouse kept its previous scroll direction.");
+    return mode.inverted;
+  }
+
+  /**
+   * Inverts the thumb wheel. Logi Options+ sets the diversion bit to implement
+   * horizontal scrolling, so it is read and preserved rather than rewritten.
+   */
+  async setThumbWheelInverted(inverted: boolean): Promise<boolean> {
+    const feature = await this.getFeature(FEATURE.thumbWheel);
+    if (!feature.index) throw new Error("This mouse has no thumb wheel.");
+
+    const status = decodeThumbWheelStatus((await this.request(feature.index, LOGITECH_THUMB_WHEEL.get)).slice(3));
+    if (!status) throw new Error("The mouse gave no answer when its thumb wheel was read.");
+
+    await this.request(feature.index, LOGITECH_THUMB_WHEEL.set, ...buildThumbWheelWrite(status, inverted));
+
+    /*
+     * Confirmed by re-reading rather than from the write's own reply. Unlike
+     * 0x2111, 0x2121 and 0x19B0, this feature does not echo the values it was
+     * given — its reply reads as all zeros, which made a write of "not
+     * inverted" appear to succeed and "inverted" appear to fail while both
+     * had actually taken effect.
+     */
+    const after = decodeThumbWheelStatus((await this.request(feature.index, LOGITECH_THUMB_WHEEL.get)).slice(3));
+    if (after?.inverted !== inverted) {
+      throw new Error("The mouse kept its previous thumb-wheel direction.");
+    }
+    return after.inverted;
+  }
+
+  /** The editable name, or null on a device without feature 0x0007. */
+  private async readFriendlyName(): Promise<{ name: string; maxLength: number } | null> {
+    if (this.friendlyNameCache !== undefined) return this.friendlyNameCache;
+
+    const feature = await this.getFeature(FEATURE.friendlyName);
+    if (!feature.index) return (this.friendlyNameCache = null);
+
+    const header = await this.request(feature.index, LOGITECH_FRIENDLY_NAME.lengths).catch(() => null);
+    const lengths = header ? decodeFriendlyNameLengths(header.slice(3)) : null;
+    if (!lengths) return null;
+    if (lengths.length === 0) return (this.friendlyNameCache = { name: "", maxLength: lengths.maxLength });
+
+    const characters: number[] = [];
+    while (characters.length < lengths.length) {
+      const chunk = await this.request(feature.index, LOGITECH_FRIENDLY_NAME.get, characters.length);
+      const decoded = decodeFriendlyNameChunk(chunk.slice(3), lengths.length - characters.length);
+      if (decoded.length === 0) break;
+      characters.push(...decoded);
+    }
+    return (this.friendlyNameCache = { name: decodeFriendlyNameText(characters), maxLength: lengths.maxLength });
+  }
+
+  /**
+   * Renames the device, then reads the name back. The read-back is not
+   * ceremony: firmware that acknowledges a write and quietly keeps its old
+   * value would otherwise look like a successful rename.
+   */
+  async setFriendlyName(name: string): Promise<string> {
+    const feature = await this.getFeature(FEATURE.friendlyName);
+    if (!feature.index) throw new Error("This mouse cannot be renamed.");
+
+    const header = await this.request(feature.index, LOGITECH_FRIENDLY_NAME.lengths);
+    const lengths = decodeFriendlyNameLengths(header.slice(3));
+    if (!lengths) throw new Error("This mouse did not report how long a name it accepts.");
+
+    const rejection = rejectFriendlyName(name, lengths.maxLength);
+    if (rejection === "empty") throw new Error("A name cannot be empty.");
+    if (rejection === "non-ascii") throw new Error("A name may only contain plain ASCII characters.");
+    if (rejection !== null) {
+      throw new Error(`This mouse allows at most ${lengths.maxLength} characters.`);
+    }
+
+    await this.requestLong(feature.index, LOGITECH_FRIENDLY_NAME.set, buildFriendlyNameWrite(name));
+
+    // The confirmation has to reach the mouse, not the value from before this
+    // write — a cache answering here would confirm nothing at all.
+    this.friendlyNameCache = undefined;
+    const confirmed = await this.readFriendlyName();
+    if (confirmed?.name !== name.trim()) {
+      throw new Error(`The mouse kept the name "${confirmed?.name ?? ""}".`);
+    }
+    return confirmed.name;
+  }
+
+  /**
+   * Easy-Switch slots, or null without feature 0x1815. Slot indices are
+   * zero-based here as they are on the wire; the button under the mouse counts
+   * from one, so anything user-facing has to add one.
+   */
+  private async readHostState(): Promise<{
+    info: LogitechHostsInfo;
+    paired: boolean[];
+  } | null> {
+    if (this.hostStateCache !== undefined) return this.hostStateCache;
+
+    const feature = await this.getFeature(FEATURE.hostsInfo);
+    if (!feature.index) return (this.hostStateCache = null);
+
+    const reply = await this.request(feature.index, LOGITECH_HOSTS.info).catch(() => null);
+    const info = reply ? decodeHostsInfo(reply.slice(3)) : null;
+    // A failed read is left uncached so the next refresh tries again, rather
+    // than a transient timeout hiding the control for the whole session.
+    if (!info) return null;
+
+    const paired: boolean[] = [];
+    for (let slot = 0; slot < info.hostCount; slot += 1) {
+      const entry = await this.request(feature.index, LOGITECH_HOSTS.host, slot).catch(() => null);
+      // A slot that will not describe itself counts as empty, never as
+      // switchable — this has to fail towards refusing the switch.
+      paired.push(entry ? decodeHostPaired(entry.slice(3)) === true : false);
+    }
+    return (this.hostStateCache = { info, paired });
+  }
+
+  /**
+   * Asks the mouse to move to another Easy-Switch slot.
+   *
+   * Named for what it can prove. A successful switch disconnects this host, so
+   * there is no state left to read back and no way to confirm the mouse
+   * arrived — disconnection IS the expected success path, not a failure.
+   * Resolving means the command reached the device: either it acknowledged, or
+   * it left before an acknowledgement could be observed and the report was
+   * accepted by the transport.
+   *
+   * An empty slot is refused outright. Switching there leaves the mouse
+   * unreachable until someone presses the button on its underside.
+   */
+  async requestHostSwitch(slot: number): Promise<void> {
+    const state = await this.readHostState();
+    const rejection = rejectHostSwitch(slot, state?.info ?? null, state?.paired ?? []);
+    if (rejection === "no-hosts") throw new Error("This mouse does not report Easy-Switch hosts.");
+    if (rejection === "already-current") throw new Error("The mouse is already on that computer.");
+    if (rejection === "empty-slot") {
+      throw new Error(
+        `Computer ${slot + 1} has nothing paired to it. Switching there would leave the mouse `
+        + "unreachable until you press the button underneath it.",
+      );
+    }
+    if (rejection !== null) {
+      throw new Error(`Computer ${slot + 1} is not one of this mouse's slots.`);
+    }
+
+    const feature = await this.getFeature(FEATURE.changeHost);
+    if (!feature.index) throw new Error("This mouse has no 0x1814 CHANGE HOST feature.");
+
+    try {
+      await this.requestWithOptions(
+        feature.index,
+        LOGITECH_CHANGE_HOST.set,
+        buildHostSwitchWrite(slot),
+        { timeoutMs: HOST_SWITCH_ACK_TIMEOUT_MS },
+      );
+    } catch (error) {
+      // The mouse leaving mid-request is the command working. Only a failure
+      // to hand the report to the transport means it never got there.
+      // A timeout here is the mouse having gone: the report reached the
+      // transport and no answer can arrive from a device that is no longer
+      // this host's. Anything else — a refusal, or sendReport failing — means
+      // the command did not take effect and must surface.
+      if (error instanceof HidppTimeoutError) return;
+      throw error;
+    }
+  }
+
+  /**
+   * Reads every reprogrammable control, what it currently does, and where it
+   * may legally be pointed.
+   *
+   * Two round-trips per control, which is why this is not part of readStatus:
+   * on an MX Master 4 that is eighteen more exchanges, enough on a wireless
+   * link to start timing other reads out. Call it on connect and after a
+   * write, not on a poll.
+   *
+   * The control table itself never changes for a given device, so it is read
+   * once per connection; only the reporting is re-read.
+   */
+  async readButtons(): Promise<LogitechReprogrammableControl[]> {
+    const feature = await this.getFeature(FEATURE.reprogControls);
+    if (!feature.index) return [];
+
+    if (this.controlInfoCache === undefined) {
+      const count = (await this.request(feature.index, LOGITECH_REPROG_CONTROLS.count))[3] ?? 0;
+      const infos: LogitechControlInfo[] = [];
+      for (let index = 0; index < count; index += 1) {
+        const reply = await this.request(feature.index, LOGITECH_REPROG_CONTROLS.info, index);
+        const info = decodeControlInfo(reply.slice(3));
+        // A control that will not describe itself is dropped rather than
+        // guessed at: without its group mask there is no way to know what it
+        // may be remapped to, and offering a target the firmware refuses is
+        // worse than not offering the control at all.
+        if (info) infos.push(info);
+      }
+      this.controlInfoCache = infos;
+    }
+    const infos = this.controlInfoCache;
+
+    const controls: LogitechReprogrammableControl[] = [];
+    for (const info of infos) {
+      const reply = await this.request(
+        feature.index,
+        LOGITECH_REPROG_CONTROLS.reporting,
+        info.controlId >> 8,
+        info.controlId & 0xff,
+      );
+      const reporting = decodeControlReporting(reply.slice(3));
+      if (!reporting) continue;
+      controls.push({
+        ...info,
+        ...reporting,
+        name: logitechControlName(info.controlId),
+        taskName: logitechTaskName(info.taskId),
+        reprogrammable: (info.flags & LOGITECH_KEY_FLAG.reprogrammable) !== 0,
+        virtual: (info.flags & LOGITECH_KEY_FLAG.virtual) !== 0,
+        remappableTo: remappableControlTargets(info, infos),
+      });
+    }
+    return controls;
+  }
+
+  /**
+   * Points one button at another control's action.
+   *
+   * The device is asked what is legal before anything is written, and the
+   * result is read back afterwards — firmware that acknowledges a remap and
+   * keeps its old mapping would otherwise look like a success.
+   */
+  async setButtonMapping(
+    controlId: number,
+    targetControlId: number,
+  ): Promise<LogitechReprogrammableControl[]> {
+    const feature = await this.getFeature(FEATURE.reprogControls);
+    if (!feature.index) throw new Error("This mouse does not expose reprogrammable controls.");
+
+    const before = await this.readButtons();
+    const control = before.find((candidate) => candidate.controlId === controlId);
+    if (!control) throw new Error("That control is not present on this mouse.");
+    if (!control.reprogrammable || !control.remappableTo.includes(targetControlId)) {
+      throw new Error(`${control.name} cannot be remapped to ${logitechControlName(targetControlId)}.`);
+    }
+
+    await this.requestLong(
+      feature.index,
+      LOGITECH_REPROG_CONTROLS.setReporting,
+      buildControlRemapWrite(controlId, targetControlId),
+    );
+
+    const after = await this.readButtons();
+    const confirmed = after.find((candidate) => candidate.controlId === controlId);
+    if (confirmed?.mappedTo !== targetControlId) {
+      throw new Error(
+        `The mouse kept ${control.name} pointing at `
+        + `${logitechControlName(confirmed?.mappedTo ?? 0)}.`,
+      );
+    }
+    return after;
+  }
+
+  /**
+   * Hands every diverted button back to the hardware.
+   *
+   * A diverted button sends HID++ notifications instead of acting, which is
+   * how a vendor application implements behaviours of its own. Logi Options+
+   * uses the temporary flag and the mouse clears that itself once Options+
+   * stops — but the persistent flag survives, so a button left that way stays
+   * dead until something clears it. That something has to exist somewhere.
+   */
+  async clearButtonDiversion(): Promise<LogitechReprogrammableControl[]> {
+    const feature = await this.getFeature(FEATURE.reprogControls);
+    if (!feature.index) throw new Error("This mouse does not expose reprogrammable controls.");
+
+    const before = await this.readButtons();
+    const diverted = before.filter((control) => control.diverted);
+    if (!diverted.length) return before;
+
+    for (const control of diverted) {
+      await this.requestLong(
+        feature.index,
+        LOGITECH_REPROG_CONTROLS.setReporting,
+        buildControlDiversionClearWrite(control.controlId),
+      );
+    }
+
+    const after = await this.readButtons();
+    const stuck = after.filter((control) => control.diverted);
+    if (stuck.length) {
+      throw new Error(`The mouse kept ${stuck.map((control) => control.name).join(", ")} diverted.`);
+    }
+    // Clearing a diversion must not have disturbed where a button points.
+    for (const control of before) {
+      const now = after.find((candidate) => candidate.controlId === control.controlId);
+      if (now && now.mappedTo !== control.mappedTo) {
+        throw new Error(`Restoring ${control.name} unexpectedly changed what it does.`);
+      }
+    }
+    return after;
+  }
+
+  /** Sets haptic strength, leaving the flag byte as the device reports it. */
+  async setHapticIntensity(intensity: number): Promise<number> {
+    if (!isLogitechHapticIntensity(intensity)) {
+      throw new Error("Haptic strength must be a whole number between 0 and 100.");
+    }
+    const confirmed = await this.writeHapticConfig({ intensity });
+    if (confirmed.intensity !== intensity) {
+      throw new Error(`The mouse kept a haptic strength of ${confirmed.intensity}.`);
+    }
+    return confirmed.intensity;
+  }
+
+  async setHapticEnabled(enabled: boolean): Promise<boolean> {
+    const confirmed = await this.writeHapticConfig({ flag: { name: "enabled", on: enabled } });
+    if (confirmed.enabled !== enabled) {
+      throw new Error(`The mouse kept haptics ${confirmed.enabled ? "on" : "off"}.`);
+    }
+    return confirmed.enabled;
+  }
+
+  async setHapticBatterySaving(enabled: boolean): Promise<boolean> {
+    const confirmed = await this.writeHapticConfig({ flag: { name: "batterySaving", on: enabled } });
+    if (confirmed.batterySaving !== enabled) {
+      throw new Error(`The mouse kept haptic battery saving ${confirmed.batterySaving ? "on" : "off"}.`);
+    }
+    return confirmed.batterySaving;
+  }
+
+  /**
+   * Fires the motor once at whatever strength is set. Nothing persists, so
+   * this is safe to use as feedback. The reply reports whether the motor was
+   * already running, which says nothing about the effect itself.
+   */
+  async playHapticEffect(effect: number = LOGITECH_HAPTIC_EFFECTS.strengthSample): Promise<void> {
+    if (!isLogitechHapticEffect(effect)) {
+      throw new Error(`This mouse has no haptic effect 0x${effect.toString(16)}.`);
+    }
+    const feature = await this.getFeature(FEATURE.haptic);
+    if (!feature.index) throw new Error("This mouse has no haptic feature.");
+    await this.request(feature.index, LOGITECH_HAPTIC.play, effect);
   }
 
   async setGamingSurfaceMode(mode: GamingSurfaceMode): Promise<GamingSurfaceMode> {
@@ -1903,6 +2720,23 @@ export class LogitechHidppClient {
     return confirmed;
   }
 
+  /**
+   * Values that cannot change while a connection is open. Easy-Switch is the
+   * clearest case: the slot count is fixed and the current slot changing IS
+   * the connection ending, because that is what switching host does. The
+   * friendly name only moves when something renames it, and this client drops
+   * the entry after its own write.
+   *
+   * Re-reading these was costing six round-trips of radio every refresh, on
+   * top of a feature lookup per read. On a wireless mouse that is enough for
+   * some reads to time out, which surfaces as controls vanishing and coming
+   * back a few seconds later.
+   */
+  private hostStateCache: { info: LogitechHostsInfo; paired: boolean[] } | null | undefined;
+  private controlInfoCache: LogitechControlInfo[] | undefined;
+  private friendlyNameCache: { name: string; maxLength: number } | null | undefined;
+  private wheelCapabilityCache: { supportsInvertScroll: boolean; supportsThumbWheelInvert: boolean } | undefined;
+
   private async getFeature(featureId: number): Promise<FeatureInfo> {
     const reply = await this.request(0x00, 0x00, featureId >> 8, featureId & 0xff);
     const feature = { index: reply[3] ?? 0, version: reply[6] ?? 0 };
@@ -2038,10 +2872,70 @@ export class LogitechHidppClient {
     return { maxActuation, maxRapidTrigger, maxHaptics, buttons };
   }
 
-  private async readDpiCapabilities(featureIndex: number): Promise<boolean> {
-    if (!featureIndex) return false;
+  private async readDpiCapabilities(featureIndex: number): Promise<{ separateAxes: boolean; liftOff: boolean }> {
+    if (!featureIndex) return { separateAxes: false, liftOff: false };
     const reply = await this.request(featureIndex, 0x10, 0x00);
-    return ((reply[5] ?? 0) & 0x01) !== 0;
+    const flags = reply[5] ?? 0;
+    return { separateAxes: (flags & 0x01) !== 0, liftOff: (flags & 0x02) !== 0 };
+  }
+
+  private async readRgbLighting(featureIndex: number): Promise<MouseLighting | null> {
+    if (this.rgbZone) return this.rgbLighting;
+    const info = await this.request(featureIndex, 0x00, 0xff, 0xff, 0x00).catch(() => null);
+    const zoneCount = Math.min(info?.[5] ?? 0, 8);
+    if (zoneCount === 0) return null;
+    // OpenMouse currently presents one lighting card. G502 X PLUS advertises
+    // its light strip as one combined cluster, so use the first advertised
+    // cluster and enumerate only effects the firmware says it accepts.
+    const zoneReply = await this.request(featureIndex, 0x00, 0x00, 0xff, 0x00);
+    const effectCount = Math.min(zoneReply[6] ?? 0, 32);
+    const zone: LogitechRgbZone = {
+      index: zoneReply[3] ?? 0,
+      location: ((zoneReply[4] ?? 0) << 8) | (zoneReply[5] ?? 0),
+      effects: [],
+    };
+    for (let effectIndex = 0; effectIndex < effectCount; effectIndex += 1) {
+      const effect = await this.request(featureIndex, 0x00, zone.index, effectIndex, 0x00);
+      zone.effects.push({
+        index: effect[4] ?? effectIndex,
+        id: ((effect[5] ?? 0) << 8) | (effect[6] ?? 0),
+        period: ((effect[9] ?? 0) << 8) | (effect[10] ?? 0),
+      });
+    }
+    this.rgbZone = zone;
+    this.rgbLighting = logitechRgbLighting(zone);
+    return this.rgbLighting;
+  }
+
+  private async readPerLedLighting(featureIndex: number, deviceName: string): Promise<MouseLighting[]> {
+    // 0x8081 exposes a 256-bit zone bitmap across three pages, but deliberately
+    // provides no color readback. Keep it scoped to the known mouse layout;
+    // keyboards sharing this feature need a keyboard-shaped editor.
+    if (!deviceName.toUpperCase().includes("G502 X")) return [];
+    const bitmap: number[] = [];
+    for (let page = 0; page < 3; page += 1) {
+      const reply = await this.request(featureIndex, 0x00, 0x00, 0x00, page);
+      bitmap.push(...reply.slice(5));
+    }
+    const ids: number[] = [];
+    for (let id = 1; id < Math.min(255, bitmap.length * 8); id += 1) {
+      if (((bitmap[id >> 3] ?? 0) & (1 << (id & 7))) !== 0) ids.push(id);
+    }
+    return ids.map((id) => ({
+      zone: `LED ${id}`,
+      group: "Lightstrip",
+      hardwareZoneId: id,
+      modes: ["Off", "Static"],
+      mode: "Static",
+      color: "#7c5cff",
+      color2: null,
+      colorModes: ["Static"],
+      dualColorModes: [],
+      reactiveModes: [],
+      speeds: [],
+      speed: null,
+      writeOnly: true,
+    }));
   }
 
   private async readDpiConfiguration(featureIndex: number): Promise<DpiConfiguration> {

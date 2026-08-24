@@ -13,20 +13,33 @@ picker. This is a system grant, not an app setting.
 
 Identifiers verified on hardware:
 
+- `1532:00a4` — Mouse Dock Pro (settings passthrough; verified with Naga V2 Pro)
 - `1532:00a5` — Viper V2 Pro, wired
 - `1532:00a6` — Viper V2 Pro, Stock receiver
+- `1532:00a7` — Naga V2 Pro, wired (firmware 1.3)
+- `1532:00a8` — Naga V2 Pro, stock HyperSpeed receiver
 - `1532:00c0` — Viper V3 Pro, wired
 - `1532:00c1` — Viper V3 Pro, HyperSpeed receiver
 - `1532:008a` — Viper Mini, wired (separate driver)
 - `1532:00b8` — Viper V3 HyperSpeed, stock HyperSpeed receiver
+- `1532:00a3` — Cobra, wired (separate driver)
+
+Mouse Dock Pro uses the same 90-byte protocol as the paired mouse. It has no
+fixed polling list: if the paired mouse answers the extended polling command it
+offers up to 8000 Hz; otherwise it stays on the 1 kHz ladder (Naga V2 Pro). The
+DPI ceiling is pinned to the paired Naga V2 Pro (30000); a higher 35k dock path
+has not been hardware-tested. Quit Razer services before probing — they can
+return unrelated `0x0f/0x03` feature reports.
+
+Naga V2 Pro hardcodes 125/500/1000 Hz on both the cable and the stock receiver.
 
 Claimed but never connected:
 
 - `1532:006e` — DeathAdder Essential, wired
 - `1532:0071` — DeathAdder Essential White Edition, wired
 - `1532:0098` — DeathAdder Essential (2021), wired
-- 99 further products from the OpenRazer reference
 - `1532:0084` — DeathAdder V2, wired
+- 96 further products from the OpenRazer reference
 
 These three shipped with the driver long before the registry existed and were
 listed here as supported, but the section below has always described them as not
@@ -284,7 +297,7 @@ this properly needs a per-command override, which is not implemented.
 
 ## Untested models
 
-`devices.ts` claims 102 further products taken from OpenRazer's supported-device
+`devices.ts` claims 100 further products taken from OpenRazer's supported-device
 table. They reuse the commands verified above; what the table records per model
 is which of those commands are valid, which transaction id the mouse answers on,
 and what its sensor and radio can do. **None has been connected**, so each is a
@@ -312,8 +325,9 @@ What is deliberately **not** attempted on an untested model:
   `asymmetricLiftOff` is set, which only the four Viper V2/V3 Pro ids have. An
   untested mouse that answers class `0x0b` still gets the plain three-stop
   tracking control, which costs reads only.
-- Lighting, button mapping and macros, none of which this driver implements for
-  any model.
+- Lighting, button mapping and macros. The generic driver implements none of
+  them for any model — the only lighting controls anywhere in this project are
+  the dedicated Cobra and Viper Mini drivers.
 
 To promote a model to verified:
 
@@ -334,8 +348,10 @@ needs new transport work rather than a table row:
   driver could only ever time out on them.
 - **Orochi V2 Bluetooth `0x0095`** — a Bluetooth HID path is not the USB control
   channel and must not be assumed to take the same reports.
-- **HyperPolling Wireless Dongle `0x00b3`** — a receiver rather than a mouse.
-  Reaching the mouse paired to it needs dongle-specific commands.
+- **HyperPolling Wireless Dongle `0x00b3`** is now present as an unverified
+  receiver transport. OpenRazer's two-step extended polling write is
+  implemented, but its WebHID collection shape and real 8 kHz application still
+  need an OpenMouse hardware capture before the entry can be marked verified.
 
 The `index3` models (Naga X `0x0096`, Basilisk V3 `0x0099`, Basilisk V3 35K
 `0x00cb`) are the least certain of those that *are* claimed: OpenRazer reaches
@@ -343,6 +359,67 @@ them through USB control-transfer index 3, and WebHID cannot select a `wIndex`.
 The picker offers every interface instead, so the right one has to be found by
 trying them. If none answers, that is worth recording — it would mean these need
 a native helper rather than a driver fix.
+
+### Viper V3 Pro SE (`1532:00de` wired, `1532:00df` wireless) — added from the reference, never connected
+
+Added from `RAZER_VIPER_V3_PRO_SE_DEVELOPER_REFERENCE.md`, which is itself built
+on OpenRazer PR **#2818** — a pull request, not merged driver source. That is
+weaker provenance than the rest of the table and the entries should be read that
+way. The PR implements the SE by subclassing the Viper V3 Pro classes, so the
+packet format, DPI pair (`04/05`, `04/85`), extended polling pair (`00/40`,
+`00/c0`) and transaction id `0x1f` all come from `0x00c0`/`0x00c1` at the source
+rather than from a family-name guess.
+
+What is *not* inherited from the V3 Pro, and why:
+
+| Field | SE | Reason |
+| --- | --- | --- |
+| `verified` | `false` | The V3 Pro's flag was earned by a hardware report on its own product ids. |
+| `liftOff` | `false` | Cannot be probed — a mouse without the feature answers `0x0b`/`0x85` with status `0x02` and zeros, which decodes as a legitimate "Low". |
+| `asymmetricLiftOff` | `false` | The mode probe is a *write*, and stays off until the command is confirmed on hardware. |
+
+### What a `0x00df` capture settled (firmware "Mouse 1.0", stock HyperSpeed receiver)
+
+**Polling — resolved, and against the reference.** The row shipped with
+`RATES_8K` because OpenRazer's SE wireless class exposes it. On hardware:
+
+| Read | Reply |
+| --- | --- |
+| extended `0x00`/`0xc0` | status `0x05` — **not supported** |
+| legacy `0x00`/`0x85` | status `0x02`, divisor `0x01` → 1000 Hz |
+
+That is an outright refusal rather than a write that confirms and does nothing,
+so unlike `0x00b7` it needed no rate measurement to settle. `0x00df` is now
+`RATES_1K` with `highRatePolling: false`. The 8 kHz ceiling belongs to the
+HyperPolling dongle, which is a separate receiver with its own product id — the
+panel had been offering four rates the receiver cannot reach.
+
+**Transaction id `0x1f` — confirmed.** Inferred from PR #2818 subclassing the
+Viper V3 Pro; every exchange in the capture used `0x1f` and was answered. A wrong
+id is silent, so this could not have read at all if it were wrong.
+
+**Control interface — confirmed as the plain mouse collection.** The reference's
+descriptor dump suggested the config path might be on a non-pointer interface.
+It is not: the driver opened `usage 0x1:2` and it answered. The other reads all
+returned sensible values — firmware `01 00` → 1.0, battery `00 FD` → 99%, DPI
+`06 40` → 1600, idle `03 84` → 900 s, low battery `0D` → 5%.
+
+Still open:
+
+1. **Every write.** The capture is reads only — no setting was changed, so
+   nothing here promotes the model to `verified`. That needs the numbered
+   checklist above: write DPI, polling and idle timeout, reload, confirm each
+   persisted.
+2. **The wired PID `0x00de`.** Untried in a browser; the PR's own smoke test
+   only ever covered `0x00df`.
+3. **Whether the narrowed filter is now worth adding.** `vendors.ts` still
+   requests the whole device for both ids, and `vendorControlInterface: true`
+   is still set. Now that `0x1:2` is known to answer on the wireless id, the
+   pair could join `RAZER_VIPER_V3_CONTROL_FILTERS` — but `0x00de` has not been
+   seen, and narrowing on one id's evidence is what this file exists to prevent.
+
+Not claimed, and not to be guessed: button remapping, Hypershift, macros and
+surface calibration. The SE has no Chroma, so no lighting control applies.
 
 ## Models Chrome may not be able to reach at all
 
@@ -495,6 +572,34 @@ and a 500 Hz write measured 499 Hz through `pointerrawupdate`.
 The cable is limited to 1000 Hz on this model, which is also the ceiling the
 legacy encoding can express, so no HyperPolling command is missing there.
 
+## Asymmetric lift-off on firmware 1.14
+
+The asymmetric pair write (`0x0b`/`0x05`) is armed by the unlock
+`0x0b`/`0x0b` `00 04 04 01` — the value Synapse sent on firmware 1.12. Firmware
+1.14 still accepts it; the Aug 12 capture that failed with status `0x03` did not
+reproduce on a fresh run with the same bytes, so it was transient or state-related
+rather than a firmware renumbering.
+
+A standalone WebHID sweep over the sensor-setting table on 1.14 (HyperSpeed
+receiver) returned:
+
+| Unlock `0x0b/0x0b` | Pair write |
+| --- | --- |
+| `00 04 04 01` (current code) | `0x02` OK |
+| `00 04 04 00` (canonical asymmetric cal) | `0x02` OK |
+| `00 04 02 00` / `02 01` / `02 02` (fixed asymmetric) | `0x03` |
+| `00 04 06 00` (self-cal) | `0x03` |
+| `00 04 03 00` (symmetric cal), `00 04 01 00` (symmetric level) | `0x03` |
+
+The calib-mode-on step (`0x0b`/`0x03` `00 04 01`) before the unlock is not
+required on this firmware. Both `04 01` and `04 00` arm the pair write with or
+without it, and the fixed/self-cal setting values never do.
+
+The code keeps `04 01`: it is verified on both 1.12 and 1.14, whereas `04 00`
+is verified only on 1.14. The canonical table entry (`04 00` = asymmetric Razer
+calibration) matching would be a cosmetic change with an unverified 1.12
+regression risk, so it stays as shipped.
+
 ## Changing the polling rate reconfigures the link
 
 Switching the receiver to 8,000 Hz briefly reconfigures the wireless link, and
@@ -637,3 +742,42 @@ carries its speed level between them.
 
 The 8500 DPI ceiling comes from the openrazer daemon class. The DPI step
 granularity is assumed to be whole values, matching the V3 Pro driver.
+
+## Cobra (verified on hardware)
+
+The Cobra (`1532:00a3`) is driven by its own client in `cobra-hid.ts`, modelled
+on the Viper Mini driver. The transaction id and the command table below were
+confirmed on hardware:
+
+1. The model and wired state appear, with no battery column (wired-only).
+2. DPI reads back correctly and the control offers 100–8500 DPI.
+3. A DPI change persists across a reload, confirming the write-with-storage
+   (`0x01`) / read-with-no-store (`0x00`) pairing.
+4. Polling rate reads and writes at 125/500/1000 Hz and persists.
+5. Every extended-matrix effect answers on transaction id `0x1f`, including
+   breathing — the one anomaly below is confirmed, not just assumed.
+
+| Read | Class / ID | Notes |
+| --- | --- | --- |
+| Firmware | `0x00` / `0x81` | transaction id `0xff` |
+| Serial | `0x00` / `0x82` | ASCII, null terminated; transaction id `0xff` |
+| DPI | `0x04` / `0x85` | no-store byte `0x00`, then big-endian X and Y |
+| Polling | `0x00` / `0x85` | divisor of 1000; wired only |
+
+| Write | Class / ID | Notes |
+| --- | --- | --- |
+| DPI | `0x04` / `0x05` | storage byte `0x01`, then big-endian X and Y |
+| Polling | `0x00` / `0x05` | divisor of 1000 |
+| Off / Static / Spectrum / Reactive / Breathing | `0x0f` / `0x02` | extended matrix effects, transaction id `0x1f` |
+
+Lighting reuses the same extended-matrix effect family (`0x0f`/`0x02`) as the
+Viper Mini, with the storage byte, the logo led (`0x04`), and the effect id in
+the first three argument bytes. Unlike the Viper Mini, whose effects all answer
+on `0x3f`, every Cobra effect answers on `0x1f`.
+
+The one anomaly in the reference is confirmed on hardware: openrazer lists the
+Cobra's breathing writes on `0x3f`, inside a block of classic-matrix mice whose
+other effects also use `0x3f`, but every other Cobra effect answers on `0x1f`
+and breathing does too, so the single `0x1f` choice holds.
+
+Brightness is not implemented: this driver covers effects and colour only.

@@ -3,22 +3,28 @@ import {
   KEYCHRON_COMMAND as CMD,
   KEYCHRON_MISC_COMMAND as MISC,
   KEYCHRON_NAPE_COMMAND as NAPE,
+  KEYCHRON_NAPE_DPI_MAX as DPI_MAX,
+  KEYCHRON_NAPE_DPI_MIN as DPI_MIN,
+  KEYCHRON_NAPE_DPI_STEP as DPI_STEP,
+  KEYCHRON_NAPE_SLEEP_MAX_SECONDS as SLEEP_MAX,
+  KEYCHRON_NAPE_SLEEP_MIN_SECONDS as SLEEP_MIN,
+  KEYCHRON_NAPE_SLEEP_OPTIONS as SLEEP_OPTIONS,
   KEYCHRON_POLLING_TABLE as POLLING_TABLE,
   KEYCHRON_PRODUCTS as PRODUCTS,
   KEYCHRON_RAW_USAGE as RAW_USAGE,
   KEYCHRON_RAW_USAGE_PAGE as RAW_USAGE_PAGE,
   KEYCHRON_REPORT_ID as REPORT_ID,
   KEYCHRON_VENDOR_ID,
+  keychronDecodeBattery,
   keychronDecodeFirmware,
   keychronDecodePolling,
+  keychronDecodeSleepTimeout,
+  keychronEncodeSleepTimeout,
   keychronPacket,
 } from "@openmouse/protocol/keychron";
 const QUERY_TIMEOUT_MS = 1200;
 
 const DPI_STAGE_COUNT = 5;
-const DPI_MIN = 50;
-const DPI_MAX = 3200;
-const DPI_STEP = 50;
 const ORIENTATION_STEPS = 8;
 const NAPE_DISPLAY_NAME = "Nape Pro";
 const PRODUCT_IDS = new Set<number>(PRODUCTS.keys());
@@ -124,6 +130,12 @@ export class KeychronHidClient {
     return options;
   }
 
+  getSleepOptions(): number[] {
+    return [...SLEEP_OPTIONS];
+  }
+
+  readonly canDisableSleep = false;
+
   async readStatus(): Promise<MouseStatus> {
     await this.open();
     const firmware = await this.getFirmwareVersion().catch(() => null);
@@ -132,6 +144,7 @@ export class KeychronHidClient {
     const battery = await this.getBattery().catch(() => null);
     const polling = await this.getPolling().catch(() => null);
     const orientation = await this.getOrientation().catch(() => null);
+    const sleepTimeout = await this.getSleepTimeout().catch(() => null);
     const active = stages.find((entry) => entry.index === stage) ?? stages[0];
     const dpi = active?.value ?? 800;
     const product = PRODUCTS.get(this.device.productId);
@@ -154,17 +167,28 @@ export class KeychronHidClient {
         hideUnsupportedPollingRates: true,
         hideProcessingCard: true,
         forceShowBattery: true,
+        showAdvancedSection: sleepTimeout !== null,
         pollingNote: "Nape Pro exposes polling through Keychron's misc HID commands when the firmware allows it.",
+        dpiStageEditor: {
+          maxStages: DPI_STAGE_COUNT,
+          countEditable: false,
+          minDpi: DPI_MIN,
+          maxDpi: DPI_MAX,
+          stepDpi: DPI_STEP,
+        },
       },
       batteryPercent: battery && battery.percent <= 100 ? battery.percent : null,
       batteryState: battery ? battery.state : "Unknown",
       dpi,
+      dpiStages: stages.map((entry) => entry.value),
+      activeDpiStage: stage,
       pollingRateHz: polling?.rateHz ?? 1000,
       supportedPollingRates: polling?.supported ?? [1000],
       activeProfile: null,
       connectionDetail: connectionDetail || "Keychron Launcher protocol",
       liftOffDistance: null,
       supportedLiftOffDistances: [],
+      sleepTimeout,
       firmware: [firmware ?? "Firmware unavailable"],
     };
   }
@@ -175,15 +199,31 @@ export class KeychronHidClient {
     }
     await this.open();
     const stage = await this.getDpiStage();
-    // Launcher writes are fire-and-forget (no matching input report).
-    await this.write([CMD.miscGroup, NAPE.setDpiValue, stage & 0xff, dpi & 0xff, (dpi >> 8) & 0xff]);
-    await this.write([CMD.miscGroup, NAPE.setDpiStage, stage & 0xff]);
-    const confirmed = await this.getDpiValue(stage);
-    if (confirmed !== dpi) {
-      await this.write([CMD.miscGroup, NAPE.setCustomDpi, dpi & 0xff, (dpi >> 8) & 0xff]);
-      return await this.getCustomDpi().catch(async () => this.getDpiValue(await this.getDpiStage()));
+    return await this.writeDpiStageValue(stage, dpi);
+  }
+
+  /** Selects the active DPI stage index (0-based). */
+  async setActiveDpiStage(stage: number): Promise<number> {
+    if (!Number.isInteger(stage) || stage < 0 || stage >= DPI_STAGE_COUNT) {
+      throw new Error(`DPI stage must be between 1 and ${DPI_STAGE_COUNT}.`);
     }
+    await this.open();
+    await this.write([CMD.miscGroup, NAPE.setDpiStage, stage & 0xff]);
+    const confirmed = await this.getDpiStage();
+    if (confirmed !== stage) throw new Error(`The mouse kept DPI stage ${confirmed + 1}.`);
     return confirmed;
+  }
+
+  /** Writes one stage's DPI value without requiring it to be active first. */
+  async setDpiStageValue(stage: number, dpi: number): Promise<number> {
+    if (!Number.isInteger(stage) || stage < 0 || stage >= DPI_STAGE_COUNT) {
+      throw new Error(`DPI stage must be between 1 and ${DPI_STAGE_COUNT}.`);
+    }
+    if (dpi < DPI_MIN || dpi > DPI_MAX) {
+      throw new Error(`Nape Pro DPI must be between ${DPI_MIN} and ${DPI_MAX}.`);
+    }
+    await this.open();
+    return await this.writeDpiStageValue(stage, dpi);
   }
 
   async setPollingRate(pollingRateHz: number): Promise<number> {
@@ -218,8 +258,26 @@ export class KeychronHidClient {
     throw new Error("Debounce is not exposed by the Nape Pro Launcher protocol.");
   }
 
-  async setSleepTimeout(_timeout: number): Promise<never> {
-    throw new Error("Sleep timeout is not exposed by the Nape Pro Launcher protocol.");
+  async setSleepTimeout(seconds: number): Promise<number> {
+    if (!Number.isInteger(seconds) || seconds < SLEEP_MIN) {
+      throw new Error("The sleep time cannot be less than 1 minute.");
+    }
+    if (seconds > SLEEP_MAX) {
+      throw new Error("The sleep time cannot be more than 12:59:59.");
+    }
+    await this.open();
+    const reply = await this.query(
+      (bytes) => bytes[0] === CMD.miscGroup && bytes[1] === MISC.setSleep,
+      keychronEncodeSleepTimeout(seconds),
+    );
+    if ((reply[2] ?? 0) !== 0) {
+      throw new Error("The Nape Pro rejected the requested sleep timeout.");
+    }
+    const confirmed = await this.getSleepTimeout();
+    if (confirmed !== seconds) {
+      throw new Error(`The mouse kept a ${confirmed} second sleep timeout instead of ${seconds} seconds.`);
+    }
+    return confirmed;
   }
 
   async setPerformanceMode(_enabled: boolean): Promise<never> {
@@ -254,19 +312,30 @@ export class KeychronHidClient {
     return values;
   }
 
+  private async writeDpiStageValue(stage: number, dpi: number): Promise<number> {
+    // Launcher writes are fire-and-forget (no matching input report).
+    await this.write([CMD.miscGroup, NAPE.setDpiValue, stage & 0xff, dpi & 0xff, (dpi >> 8) & 0xff]);
+    const active = await this.getDpiStage();
+    if (active === stage) {
+      await this.write([CMD.miscGroup, NAPE.setDpiStage, stage & 0xff]);
+    }
+    const confirmed = await this.getDpiValue(stage);
+    if (confirmed !== dpi) {
+      if (active === stage) {
+        await this.write([CMD.miscGroup, NAPE.setCustomDpi, dpi & 0xff, (dpi >> 8) & 0xff]);
+        return await this.getCustomDpi().catch(async () => this.getDpiValue(stage));
+      }
+      throw new Error(`The mouse kept ${confirmed} DPI instead of ${dpi} DPI.`);
+    }
+    return confirmed;
+  }
+
   private async getBattery(): Promise<{ percent: number; state: MouseStatus["batteryState"] }> {
     const response = await this.query(
       (bytes) => bytes[0] === CMD.miscGroup && bytes[1] === NAPE.getBattery,
       [CMD.miscGroup, NAPE.getBattery],
     );
-    const percent = response[2] ?? 0xff;
-    const status = response[3] ?? 0;
-    const state: MouseStatus["batteryState"] = status === 1
-      ? "Charging"
-      : status === 2
-        ? "Full"
-        : "Discharging";
-    return { percent, state };
+    return keychronDecodeBattery(response);
   }
 
   private async getOrientationIndex(): Promise<number> {
@@ -297,6 +366,14 @@ export class KeychronHidClient {
       [CMD.miscGroup, MISC.getPolling],
     );
     return keychronDecodePolling(response);
+  }
+
+  private async getSleepTimeout(): Promise<number> {
+    const response = await this.query(
+      (bytes) => bytes[0] === CMD.miscGroup && bytes[1] === MISC.getSleep,
+      [CMD.miscGroup, MISC.getSleep],
+    );
+    return keychronDecodeSleepTimeout(response);
   }
 
   private async getFirmwareVersion(): Promise<string | null> {

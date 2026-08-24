@@ -54,7 +54,7 @@ const PROFILE_FORMAT_NAMES: Record<number, string> = {
  * release — see docs/logitech-onboard-profiles.md.
  */
 const VERIFIED_FORMATS = new Set([2, 3, 4, 7]);
-const WRITABLE_FORMATS = new Set([2, 4, 7]);
+const WRITABLE_FORMATS = new Set([2, 3, 4, 7]);
 const PROFILE_WRITE_PROBE_FORMATS = new Set([2, 3, 4]);
 const FACTORY_RESET_FORMATS = new Set([7]);
 
@@ -207,6 +207,17 @@ const FORMAT_CAPABILITIES: Record<number, ProfileFormatCapabilities> = {
     maxNameLength: PROFILE_NAME_MAX_CHARS,
     bunnyHop: false,
   },
+  // A G703 on format 3 reported four of five scalar slots, 50-12000 DPI in
+  // steps of 50, and 125/250/500/1000 Hz. Name, default-slot DPI, and wired
+  // rate writes were applied, confirmed live, and restored.
+  3: {
+    supportedLods: [],
+    lodEncoding: LOD_ENCODING,
+    dpiStages: { maxStages: 5, minDpi: 50, maxDpi: 12000, stepDpi: 50 },
+    reportRates: { wirelessMaxHz: 1000, wiredMaxHz: 1000 },
+    maxNameLength: PROFILE_NAME_MAX_CHARS,
+    bunnyHop: false,
+  },
   // A G102 LIGHTSYNC on format 4 reported five scalar slots, 50-8000 DPI in
   // steps of 50, and 125/250/500/1000 Hz through the capability collector.
   // Its DPI, rate, and name writes were applied, read back live, and restored.
@@ -296,7 +307,9 @@ export function decodeLiftOffLevel(
 export interface OnboardProfilesInfo {
   memoryModelId: number;
   profileFormatId: number;
+  macroFormatId: number;
   profileCount: number;
+  buttonCount: number;
   sectorCount: number;
   sectorSize: number;
 }
@@ -331,9 +344,145 @@ export interface OnboardProfile {
    * three confirmed on hardware; 0xff is unwritten flash and decodes as null.
    */
   bunnyHoppingMs: number | null;
+  buttonAssignments: OnboardButtonAssignment[];
+  gShiftAssignments: OnboardButtonAssignment[];
   crcValid: boolean;
   /** Raw sector, kept so captures can diff before/after a vendor-app change. */
   raw: Uint8Array;
+}
+
+export type LogitechButtonAction =
+  | "Disabled" | "Left click" | "Right click" | "Middle click" | "Back" | "Forward"
+  | "Tilt left" | "Tilt right" | "Next DPI" | "Previous DPI" | "Cycle DPI"
+  | "Default DPI" | "DPI Shift" | "Next profile" | "Previous profile"
+  | "Cycle profiles" | "G-Shift" | "Battery indicator";
+
+export interface OnboardButtonAssignment {
+  button: number;
+  action: LogitechButtonAction | "Custom";
+  raw: readonly number[];
+}
+
+export type LogitechButtonBinding =
+  | { kind: "action"; action: LogitechButtonAction }
+  | { kind: "keyboard"; key: number; modifiers: number }
+  | { kind: "consumer"; usage: number };
+
+export interface LogitechMacroStep {
+  key: number;
+  modifiers: number;
+  /** Pause before this chord, in milliseconds. */
+  delayMs: number;
+}
+
+/** Encodes the HID++ macro format used by G502 onboard-memory sectors. */
+export function encodeMacroSector(sectorSize: number, steps: readonly LogitechMacroStep[]): Uint8Array {
+  if (!Number.isInteger(sectorSize) || sectorSize < 6 || !steps.length) {
+    throw new Error("The macro sector geometry or sequence is invalid.");
+  }
+  const records: number[][] = [];
+  for (const [index, step] of steps.entries()) {
+    if (!Number.isInteger(step.key) || step.key < 1 || step.key > 0xff
+      || !Number.isInteger(step.modifiers) || step.modifiers < 0 || step.modifiers > 0xff
+      || !Number.isInteger(step.delayMs) || step.delayMs < 0 || step.delayMs > 0xffff) {
+      throw new Error("The macro contains an invalid key, modifier, or delay.");
+    }
+    if (index > 0 && step.delayMs > 0) records.push([0x40, step.delayMs >> 8, step.delayMs & 0xff]);
+    const modifiers = Array.from({ length: 8 }, (_, bit) => 1 << bit)
+      .filter((bit) => (step.modifiers & bit) !== 0);
+    for (const modifier of modifiers) records.push([0x43, modifier, 0x00]);
+    records.push([0x43, 0x00, step.key], [0x44, 0x00, step.key]);
+    for (const modifier of modifiers.reverse()) records.push([0x44, modifier, 0x00]);
+  }
+  records.push([0xff, 0xff, 0xff]);
+  if (records.length * 3 > sectorSize) throw new Error("That sequence is too long for one onboard macro sector.");
+  const result = new Uint8Array(sectorSize).fill(0xff);
+  records.forEach((record, index) => result.set(record, index * 3));
+  return result;
+}
+
+export function encodeMacroButtonAssignment(
+  profile: Uint8Array,
+  profileFormatId: number,
+  layer: "primary" | "g-shift",
+  button: number,
+  macroSector: number,
+): Uint8Array {
+  if (!Number.isInteger(macroSector) || macroSector < 1 || macroSector > 0xff) {
+    throw new Error("The macro sector cannot be represented by this profile format.");
+  }
+  const name = layer === "primary" ? "button_functions" : "g_shift_function";
+  const component = componentsForFormat(profileFormatId).find((candidate) => candidate.name === name);
+  if (!component || !Number.isInteger(button) || button < 0 || button >= component.size / 4) {
+    throw new Error("That button is outside this profile format's assignment table.");
+  }
+  const result = profile.slice();
+  result.set([0x00, button & 0xff, macroSector, 0x00], component.offset + button * 4);
+  return applyCrc(result);
+}
+
+export const LOGITECH_BUTTON_ACTIONS: readonly LogitechButtonAction[] = [
+  "Disabled", "Left click", "Right click", "Middle click", "Back", "Forward",
+  "Tilt left", "Tilt right", "Next DPI", "Previous DPI", "Cycle DPI", "Default DPI",
+  "DPI Shift", "Next profile", "Previous profile", "Cycle profiles", "G-Shift", "Battery indicator",
+];
+
+const ACTION_RECORDS: Readonly<Record<LogitechButtonAction, readonly number[]>> = {
+  Disabled: [0xff, 0xff, 0xff, 0xff],
+  "Left click": [0x80, 0x01, 0x00, 0x01],
+  "Right click": [0x80, 0x01, 0x00, 0x02],
+  "Middle click": [0x80, 0x01, 0x00, 0x04],
+  Back: [0x80, 0x01, 0x00, 0x08],
+  Forward: [0x80, 0x01, 0x00, 0x10],
+  "Tilt left": [0x90, 0x01, 0x00, 0x00],
+  "Tilt right": [0x90, 0x02, 0x00, 0x00],
+  "Next DPI": [0x90, 0x03, 0x00, 0x00],
+  "Previous DPI": [0x90, 0x04, 0x00, 0x00],
+  "Cycle DPI": [0x90, 0x05, 0x00, 0x00],
+  "Default DPI": [0x90, 0x06, 0x00, 0x00],
+  "DPI Shift": [0x90, 0x07, 0x00, 0x00],
+  "Next profile": [0x90, 0x08, 0x00, 0x00],
+  "Previous profile": [0x90, 0x09, 0x00, 0x00],
+  "Cycle profiles": [0x90, 0x0a, 0x00, 0x00],
+  "G-Shift": [0x90, 0x0b, 0x00, 0x00],
+  "Battery indicator": [0x90, 0x0c, 0x00, 0x00],
+};
+
+function decodeButtonAssignments(bytes: Uint8Array, component: ComponentSpec): OnboardButtonAssignment[] {
+  const result: OnboardButtonAssignment[] = [];
+  for (let button = 0; button < component.size / 4; button += 1) {
+    const raw = [...bytes.slice(component.offset + button * 4, component.offset + button * 4 + 4)];
+    if (raw.length < 4) break;
+    const action = (Object.entries(ACTION_RECORDS) as Array<[LogitechButtonAction, readonly number[]]>)
+      .find(([, record]) => record.every((value, index) => value === raw[index]))?.[0] ?? "Custom";
+    result.push({ button, action, raw });
+  }
+  return result;
+}
+
+export function encodeButtonAssignment(
+  sector: Uint8Array,
+  profileFormatId: number,
+  layer: "primary" | "g-shift",
+  button: number,
+  binding: LogitechButtonAction | LogitechButtonBinding,
+): Uint8Array {
+  const name = layer === "primary" ? "button_functions" : "g_shift_function";
+  const component = componentsForFormat(profileFormatId).find((candidate) => candidate.name === name);
+  if (!component || !Number.isInteger(button) || button < 0 || button >= component.size / 4) {
+    throw new Error("That button is outside this profile format's assignment table.");
+  }
+  const normalized: LogitechButtonBinding = typeof binding === "string"
+    ? { kind: "action", action: binding }
+    : binding;
+  const record = normalized.kind === "action"
+    ? ACTION_RECORDS[normalized.action]
+    : normalized.kind === "keyboard"
+      ? [0x80, 0x02, normalized.modifiers & 0xff, normalized.key & 0xff]
+      : [0x80, 0x03, (normalized.usage >> 8) & 0xff, normalized.usage & 0xff];
+  const result = sector.slice();
+  result.set(record, component.offset + button * 4);
+  return applyCrc(result);
 }
 
 /** Report-rate bytes index this table, matching 0x8061's ordering. */
@@ -448,7 +597,9 @@ export function parseProfilesInfo(reply: Uint8Array): OnboardProfilesInfo {
   return {
     memoryModelId: reply[3] ?? 0,
     profileFormatId: reply[4] ?? 0,
+    macroFormatId: reply[5] ?? 0,
     profileCount: reply[6] ?? 0,
+    buttonCount: reply[8] ?? 0,
     sectorCount: reply[9] ?? 0,
     sectorSize: ((reply[10] ?? 0) << 8) | (reply[11] ?? 0),
   };
@@ -986,6 +1137,9 @@ export function decodeOnboardProfile(
     ? { stages: [], defaultIndex: null }
     : legacyLayout ? decodeLegacyDpi(bytes, layout.dpi) : decodeDpi(bytes, layout.dpi);
   const angleSnappingByte = bytes[layout.angleSnapping];
+  const components = componentsForFormat(profileFormatId);
+  const buttons = components.find((component) => component.name === "button_functions")!;
+  const gShift = components.find((component) => component.name === "g_shift_function")!;
 
   return {
     sector: entry.sector,
@@ -1012,6 +1166,8 @@ export function decodeOnboardProfile(
       ? null
       : readUint16LE(bytes, layout.powerOffTimeout),
     bunnyHoppingMs: decodeBunnyHoppingMs(bytes, layout.bunnyHopping),
+    buttonAssignments: decodeButtonAssignments(bytes, buttons),
+    gShiftAssignments: decodeButtonAssignments(bytes, gShift),
     crcValid: bytes.length > 2 && profileCrc(bytes) === storedCrc(bytes),
     raw: bytes,
   };

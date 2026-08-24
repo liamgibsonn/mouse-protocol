@@ -17,6 +17,9 @@ import {
   describeProfileFormat,
   dpiStageCapabilitiesForOptions,
   encodeDpiStages,
+  encodeButtonAssignment,
+  encodeMacroButtonAssignment,
+  encodeMacroSector,
   encodeProfileName,
   encodeReportRate,
   factoryProfileForFormat,
@@ -262,10 +265,26 @@ test("parses getOnboardProfilesInfo", () => {
   assert.deepEqual(parseProfilesInfo(INFO_REPLY), {
     memoryModelId: 1,
     profileFormatId: 7,
+    macroFormatId: 1,
     profileCount: 5,
+    buttonCount: 5,
     sectorCount: 16,
     sectorSize: 255,
   });
+});
+
+test("encodes an onboard keyboard macro and links it to a button", () => {
+  const macro = encodeMacroSector(36, [
+    { key: 0x0e, modifiers: 0x03, delayMs: 0 },
+    { key: 0x2c, modifiers: 0, delayMs: 250 },
+  ]);
+  assert.deepEqual([...macro.slice(0, 24)], [
+    0x43, 0x01, 0, 0x43, 0x02, 0, 0x43, 0, 0x0e, 0x44, 0, 0x0e,
+    0x44, 0x02, 0, 0x44, 0x01, 0, 0x40, 0, 250, 0x43, 0, 0x2c,
+  ]);
+  const linked = encodeMacroButtonAssignment(G502_SECTORS[0], 2, "primary", 5, 9);
+  assert.deepEqual([...linked.slice(0x20 + 20, 0x20 + 24)], [0, 5, 9, 0]);
+  assert.equal(profileCrc(linked), storedCrc(linked));
 });
 
 test("parses the profile directory and its enabled flags", () => {
@@ -454,14 +473,18 @@ test("parses the captured G502 format-2 geometry and directory", () => {
   assert.deepEqual(parseProfilesInfo(G502_INFO_REPLY), {
     memoryModelId: 1,
     profileFormatId: 2,
+    macroFormatId: 1,
     profileCount: 3,
+    buttonCount: 11,
     sectorCount: 16,
     sectorSize: 256,
   });
   assert.deepEqual(parseProfilesInfo(G502_HERO_INFO_REPLY), {
     memoryModelId: 1,
     profileFormatId: 2,
+    macroFormatId: 1,
     profileCount: 5,
+    buttonCount: 11,
     sectorCount: 16,
     sectorSize: 256,
   });
@@ -549,12 +572,14 @@ test("decodes all captured G502 LIGHTSPEED format-3 profiles", () => {
 test("parses the captured G502 LIGHTSPEED format-3 geometry and directory", () => {
   assert.deepEqual(
     { verified: describeProfileFormat(3).verified, writable: describeProfileFormat(3).writable },
-    { verified: true, writable: false },
+    { verified: true, writable: true },
   );
   assert.deepEqual(parseProfilesInfo(G502_LIGHTSPEED_INFO_REPLY), {
     memoryModelId: 1,
     profileFormatId: 3,
+    macroFormatId: 1,
     profileCount: 5,
+    buttonCount: 11,
     sectorCount: 16,
     sectorSize: 255,
   });
@@ -566,6 +591,13 @@ test("parses the captured G502 LIGHTSPEED format-3 geometry and directory", () =
     { sector: 4, enabled: false },
     { sector: 5, enabled: false },
   ]);
+});
+
+test("format-3 encoders use the G703-captured scalar grid and shared rate", () => {
+  const capabilities = capabilitiesForFormat(3);
+  assert.deepEqual(capabilities.dpiStages, { maxStages: 5, minDpi: 50, maxDpi: 12000, stepDpi: 50 });
+  assert.deepEqual(reportRatesFor(capabilities.reportRates, "wired"), [125, 250, 500, 1000]);
+  assert.equal(describeProfileFormat(3).writable, true);
 });
 
 test("format-3 probe encoders accept limits collected live from the mouse", () => {
@@ -623,7 +655,9 @@ test("parses the captured G102 LIGHTSYNC format-4 geometry and directory", () =>
   assert.deepEqual(parseProfilesInfo(G102_LIGHTSYNC_INFO_REPLY), {
     memoryModelId: 1,
     profileFormatId: 4,
+    macroFormatId: 1,
     profileCount: 1,
+    buttonCount: 6,
     sectorCount: 16,
     sectorSize: 255,
   });
@@ -1061,4 +1095,22 @@ test("a corrupted byte invalidates the CRC", () => {
   const tampered = SECTOR_3.slice();
   tampered[0x04] ^= 0xff;
   assert.equal(decodeOnboardProfile(tampered, 7, { sector: 3, enabled: true }, true).crcValid, false);
+});
+
+test("G502 normal and G-Shift button assignments round-trip without touching other records", () => {
+  const normal = encodeButtonAssignment(G502_SECTORS[0], 2, "primary", 5, "DPI Shift");
+  const shifted = encodeButtonAssignment(normal, 2, "g-shift", 5, "Cycle profiles");
+  const decoded = decodeOnboardProfile(shifted, 2, { sector: 1, enabled: true }, false);
+  assert.equal(decoded.buttonAssignments[5]?.action, "DPI Shift");
+  assert.equal(decoded.gShiftAssignments[5]?.action, "Cycle profiles");
+  assert.deepEqual([...shifted.slice(0x20, 0x20 + 5 * 4)], [...G502_SECTORS[0].slice(0x20, 0x20 + 5 * 4)]);
+  assert.equal(decoded.crcValid, true);
+});
+
+test("G502 keyboard shortcuts and consumer keys use direct four-byte HID bindings", () => {
+  const keyboard = encodeButtonAssignment(G502_SECTORS[0], 2, "primary", 5, { kind: "keyboard", modifiers: 0x03, key: 0x0e });
+  assert.deepEqual([...keyboard.slice(0x20 + 5 * 4, 0x20 + 6 * 4)], [0x80, 0x02, 0x03, 0x0e]);
+  const media = encodeButtonAssignment(keyboard, 2, "g-shift", 5, { kind: "consumer", usage: 0x00cd });
+  assert.deepEqual([...media.slice(0x60 + 5 * 4, 0x60 + 6 * 4)], [0x80, 0x03, 0x00, 0xcd]);
+  assert.equal(profileCrc(media), storedCrc(media));
 });

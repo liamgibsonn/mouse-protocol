@@ -46,6 +46,20 @@ export interface MouseUiHints {
   pollingNote?: string;
   /** Sidebar name before first status read. */
   defaultDisplayName?: string;
+  /**
+   * Simple multi-stage DPI editor in the Sensitivity card (single-axis stages).
+   * Distinct from Logitech onboard slots and Endgame CPI tiles. When set with
+   * `dpiStages` on the status, the shared stage list is shown.
+   */
+  dpiStageEditor?: {
+    /** Highest number of stages the mouse can enable. */
+    maxStages: number;
+    /** When false, stage count is fixed and the count picker is hidden. */
+    countEditable?: boolean;
+    minDpi: number;
+    maxDpi: number;
+    stepDpi: number;
+  };
 }
 
 /**
@@ -81,6 +95,10 @@ export interface MouseLighting {
   brightnessLevels?: readonly number[];
   /** True when the mouse cannot report the effect back (Razer effect writes). */
   writeOnly?: boolean;
+  /** HID++ per-key/per-LED zone id when this is a directly painted RGB cell. */
+  hardwareZoneId?: number;
+  /** Lets the UI group individually painted cells into one physical surface. */
+  group?: string;
 }
 
 export type MouseLightingMode =
@@ -95,7 +113,7 @@ export type MouseLightingMode =
   | "Breathing dual";
 
 export interface MouseStatus {
-  brand: "Logitech" | "Pulsar" | "Endgame Gear" | "WLMouse" | "Lamzu" | "Orbital" | "Razer" | "Teevolution" | "ATK" | "VGN" | "Finalmouse" | "Keychron" | "moddoMOUSE" | "Ninjutso" | "MSI";
+  brand: "Logitech" | "Pulsar" | "Endgame Gear" | "WLMouse" | "G-Wolves" | "Lamzu" | "CRDRAKO" | "Attack Shark" | "Orbital" | "Razer" | "Teevolution" | "ATK" | "VGN" | "Finalmouse" | "Keychron" | "moddoMOUSE" | "Ninjutso" | "Zaunkoenig" | "Fantech" | "Wooting" | "WALLHACK" | "MSI";
   name: string;
   /** Driver-supplied UI policy (optional; keeps control.ts brand-agnostic). */
   ui?: MouseUiHints;
@@ -121,14 +139,19 @@ export interface MouseStatus {
   transportIds?: Record<string, string>;
   connectionType?: "Wired" | "Wireless";
   connectionDetail?: string;
+  /** Zaunkoenig exposes the USB link mode as part of its packed configuration. */
+  usbSpeed?: "Full" | "High";
+  /** Physical button which sends the primary/left-click action. */
+  primaryButton?: "Left" | "Right";
   dongleLedEnabled?: boolean | null;
   finalmouseDongleLedMode?: number | null;
   finalmouseTournamentScrollMode?: number | null;
   finalmouseTournamentScrollTimeoutMs?: number | null;
   signalStrength?: number | null;
   motionSync?: boolean | null;
-  /** NinjaForce DPI stages, where supported. */
+  /** On-device DPI stages, where supported (Teevolution, Ninjutso, …). */
   dpiStages?: number[];
+  /** Active DPI stage index into `dpiStages` (0-based). */
   activeDpiStage?: number;
   ninjutsoSystemMode?: "High Speed" | "Competitive" | "Ultra" | null;
   ninjutsoSystemModes?: Array<"High Speed" | "Competitive" | "Ultra">;
@@ -148,7 +171,19 @@ export interface MouseStatus {
   eggPollingDivider?: number;
   eggMulticlickFilters?: number[];
   eggButtonMappings?: string[];
+  /**
+   * Every shipped Razer control's current state, keyed by control name — the
+   * four cross-assignable `RazerButtonControl`s and the three two-state
+   * `RazerToggleControl`s share one dict, since each family's renderer
+   * iterates its own fixed control list and the two lists share no control
+   * names. Undefined on a model that has not been confirmed to support the
+   * class `0x02` write at all. A control whose reply the driver cannot decode
+   * (a keyboard shortcut, Hypershift data, an index nothing here knows) is
+   * omitted rather than guessed at.
+   */
+  razerButtonMappings?: Record<string, string>;
   performanceMode?: boolean | null;
+  hyperMode?: boolean | null;
   sensorMode?: "Eco" | "High" | "Ultra" | null;
   sensorModeStored?: 0 | 1 | null;
   sensorModeEditable?: boolean | null;
@@ -191,9 +226,45 @@ export interface MouseStatus {
     /** False until profile-content writes were applied and restored on hardware. */
     writable: boolean;
   } | null;
+  /** Logitech 0x19B0 haptic strength, 0-100. Null when the device has no haptics. */
+  /**
+   * Logitech 0x2111 byte 0 — the wheel's ratchet mode, the same thing the
+   * button behind the wheel toggles. Not SmartShift on/off.
+   */
+  wheelMode?: "Freespin" | "Ratchet" | null;
+  /**
+   * Logitech 0x2111 byte 1. 255 disables SmartShift; any lower value enables
+   * it and sets how gentle a flick releases the ratchet.
+   */
+  smartShiftThreshold?: number | null;
+  /** Logitech 0x2121 — high-resolution (smooth) scrolling. */
+  hiResScroll?: boolean | null;
+  invertScroll?: boolean | null;
+  supportsInvertScroll?: boolean;
+  /** Live read of whether the wheel is currently ratcheted. */
+  wheelRatchetEngaged?: boolean | null;
+  /** Logitech 0x2150 — the horizontal thumb wheel. */
+  thumbWheelInverted?: boolean | null;
+  supportsThumbWheelInvert?: boolean;
+  /** Logitech 0x0007 — the editable name, distinct from the fixed device name. */
+  friendlyName?: string | null;
+  friendlyNameMaxLength?: number | null;
+  /** Logitech 0x1815 — Easy-Switch slot count, or null without the feature. */
+  hostCount?: number | null;
+  /** Zero-based active slot; the button under the mouse counts from one. */
+  currentHost?: number | null;
+  /** One entry per slot, true when a computer is paired to it. */
+  hostSlotsPaired?: boolean[] | null;
+  hapticIntensity?: number | null;
+  /** Logitech 0x19B0 byte 0 bit 0 — haptic feedback on or off. */
+  hapticEnabled?: boolean | null;
+  /** Logitech 0x19B0 byte 0 bit 1 — the device's own haptic battery saver. */
+  hapticBatterySaving?: boolean | null;
   gamingSurfaceMode?: "On" | "Off" | "Auto" | null;
   lightforceSwitchMode?: "Hybrid" | "Optical" | null;
   /** Razer lighting zones. */
   lighting?: MouseLighting;
+  /** Independently addressable lighting zones. `lighting` remains the first zone for compatibility. */
+  lightingZones?: MouseLighting[];
   firmware: string[];
 }

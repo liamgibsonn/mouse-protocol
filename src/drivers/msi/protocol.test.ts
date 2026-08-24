@@ -20,6 +20,7 @@ import {
   encodeMsiPollingRate,
   encodeMsiSpeed,
   isValidMsiDpiPreset,
+  msiDpiOptions,
   MSI_BUTTON_ID,
   MSI_FRAME_MARKER,
   MSI_REPORT_LENGTH,
@@ -60,10 +61,11 @@ test("DPI preset write matches the captured preset-write report", () => {
 test("DPI preset validation follows the 100-step range", () => {
   // Act / Assert
   assert.equal(isValidMsiDpiPreset(100), true);
-  assert.equal(isValidMsiDpiPreset(25500), true);
+  assert.equal(isValidMsiDpiPreset(20000), true);
+  assert.equal(isValidMsiDpiPreset(19500), true); // encodable, though MSI Center does not offer it
   assert.equal(isValidMsiDpiPreset(50), false); // below min
   assert.equal(isValidMsiDpiPreset(150), false); // not a step of 100
-  assert.equal(isValidMsiDpiPreset(25600), false); // above max
+  assert.equal(isValidMsiDpiPreset(20100), false); // above max
   assert.throws(() => encodeMsiDpiPresetWrite([150, 200, 300, 400, 500]));
 });
 
@@ -140,4 +142,18 @@ test("button bindings match the captured mouse-function, multimedia, macro, and 
     [0x0d, 0x41, 0x10, 0x00, 0x0c, 0x04, 0x00, 0x00],
   );
   assert.throws(() => encodeMsiButtonMacro(MSI_BUTTON_ID.left, 31));
+});
+
+test("msiDpiOptions mirrors the ladder MSI Center offers", () => {
+  // Act
+  const options = msiDpiOptions();
+
+  // Assert
+  assert.equal(options[0], 100);
+  assert.equal(options.at(-1), 20000);
+  assert.equal(options.at(-2), 19000); // 19,100-19,900 are not offered
+  assert.equal(options.length, 191); // 190 stepped values plus the 20,000 stop
+  assert.deepEqual([...options].sort((a, b) => a - b), options); // ascending
+  assert.equal(new Set(options).size, options.length); // no duplicates
+  assert.ok(options.every((dpi) => isValidMsiDpiPreset(dpi))); // every offer is writable
 });

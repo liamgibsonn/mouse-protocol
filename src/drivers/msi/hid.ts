@@ -12,6 +12,7 @@ import {
   encodeMsiPollingRate,
   encodeMsiSpeed,
   isValidMsiDpiPreset,
+  msiDpiOptions,
   MSI_PRODUCT_ID,
   MSI_SUPPORTED_POLLING_RATES,
   MSI_VENDOR_ID,
@@ -119,6 +120,10 @@ export class MsiHidClient {
   // DPI
   // ---------------------------------------------------------------------
 
+  getDpiOptions(): number[] {
+    return msiDpiOptions();
+  }
+
   /** Writes the given DPI to the currently active preset slot, then selects it. */
   async setDpi(dpi: number): Promise<number> {
     if (!isValidMsiDpiPreset(dpi)) {
@@ -162,7 +167,15 @@ export class MsiHidClient {
   // Performance
   // ---------------------------------------------------------------------
 
-  async setLiftOffDistance(value: MsiLiftOffDistance): Promise<void> {
+  /**
+   * The GM41 has two lift-off stops, but the shared control surface offers
+   * three, so accept the wider type and reject the stop this mouse lacks.
+   * `supportedLiftOffDistances` in `readStatus` keeps the UI from offering it.
+   */
+  async setLiftOffDistance(value: NonNullable<MouseStatus["liftOffDistance"]>): Promise<void> {
+    if (value !== "Low" && value !== "High") {
+      throw new Error("MSI Clutch GM41 lift-off distance must be Low or High.");
+    }
     await this.open();
     await this.device.sendFeatureReport(0, encodeMsiLiftOffDistance(value));
     this.liftOff = value;

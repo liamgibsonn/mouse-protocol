@@ -83,14 +83,41 @@ export function encodeMsiDpiStage(stage: 1 | 2 | 3 | 4 | 5): Uint8Array<ArrayBuf
 }
 
 export const MSI_DPI_PRESET_MIN = 100;
-export const MSI_DPI_PRESET_MAX = 25500; // 0xff * 100 -- the value byte is a single u8
+/**
+ * Highest DPI the GM41 is known to accept.
+ *
+ * The value byte is a single u8 of hundreds, so the wire format could express
+ * up to 25,500. MSI Center stops at 20,000, which is taken here as the sensor
+ * ceiling; writing above it would be speculative.
+ */
+export const MSI_DPI_PRESET_MAX = 20000;
 export const MSI_DPI_PRESET_STEP = 100;
+/** Highest DPI MSI Center offers on the regular 100 DPI ladder. */
+export const MSI_DPI_STEPPED_MAX = 19000;
 
 export function isValidMsiDpiPreset(dpi: number): boolean {
   return Number.isInteger(dpi)
     && dpi >= MSI_DPI_PRESET_MIN
     && dpi <= MSI_DPI_PRESET_MAX
     && dpi % MSI_DPI_PRESET_STEP === 0;
+}
+
+/**
+ * The DPI values to offer for this mouse: 100–19,000 in 100 DPI steps, then a
+ * single 20,000 stop.
+ *
+ * Observed from MSI Center, not read from the device. 19,100–19,900 are
+ * encodable and `isValidMsiDpiPreset` accepts them, but MSI's own software
+ * does not offer them and it is not known whether the sensor supports them, so
+ * they are left out of the list presented to the user.
+ */
+export function msiDpiOptions(): number[] {
+  const options: number[] = [];
+  for (let dpi = MSI_DPI_PRESET_MIN; dpi <= MSI_DPI_STEPPED_MAX; dpi += MSI_DPI_PRESET_STEP) {
+    options.push(dpi);
+  }
+  options.push(MSI_DPI_PRESET_MAX);
+  return options;
 }
 
 /** Write all five custom DPI presets in one report. Each value is DPI / 100. */

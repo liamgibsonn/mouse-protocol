@@ -23,6 +23,20 @@
 export const MSI_VENDOR_ID = 0x0db0;
 export const MSI_PRODUCT_ID = 0x0d4c; // MSI Clutch GM41
 
+/**
+ * The config interface (Windows MI_01, "Vendor Defined").
+ *
+ * Confirmed on hardware: the GM41 exposes three collections to WebHID —
+ * `0xff10`/`0x06` carrying feature report 0, `0x01`/`0x02` (boot mouse) and
+ * `0x01`/`0x06` plus `0x0c`/`0x01` (keyboard and consumer control). Only the
+ * first accepts feature reports; the other two are owned by Windows' own
+ * mouse and keyboard stacks and reject every write.
+ */
+export const MSI_CONFIG_USAGE_PAGE = 0xff10;
+export const MSI_CONFIG_USAGE = 0x06;
+/** The config collection's only feature report is unnumbered (report id 0). */
+export const MSI_CONFIG_REPORT_ID = 0;
+
 export const MSI_REPORT_LENGTH = 8;
 /** Constant first byte of every report. Not a WebHID "report id" — MSI always
  * sends report id 0 (see wValue above) and puts this marker in the payload. */

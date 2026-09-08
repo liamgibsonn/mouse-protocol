@@ -93,6 +93,14 @@ export interface MouseLighting {
   brightness?: number | null;
   /** Brightness percentages the device accepts. */
   brightnessLevels?: readonly number[];
+  /**
+   * Effects that expose a brightness control. Defaults to every mode in
+   * `modes` when omitted, matching every driver that predates this field.
+   * Set this (not `brightnessLevels`, which the UI's optimistic preview
+   * cannot recompute mid-edit) when brightness is meaningless for some modes
+   * — e.g. "Off", where there is no LED to dim.
+   */
+  brightnessModes?: readonly MouseLightingMode[];
   /** True when the mouse cannot report the effect back (Razer effect writes). */
   writeOnly?: boolean;
   /** HID++ per-key/per-LED zone id when this is a directly painted RGB cell. */
@@ -110,7 +118,15 @@ export type MouseLightingMode =
   | "Reactive"
   | "Breathing random"
   | "Breathing single"
-  | "Breathing dual";
+  | "Breathing dual"
+  // Single-word label for a plain one-colour breathing effect (MSI's naming).
+  // Distinct from "Breathing single" above, which Razer and Logitech already
+  // use for their own single-colour breathing effect and keep unchanged.
+  | "Breathe"
+  // MSI's name for its colour-cycling effect. Distinct from "Cycling" above,
+  // which other drivers already use for their own colour-cycling effect and
+  // keep unchanged.
+  | "Rainbow";
 
 export interface MouseStatus {
   brand: "Logitech" | "Pulsar" | "Endgame Gear" | "WLMouse" | "G-Wolves" | "Lamzu" | "CRDRAKO" | "Attack Shark" | "Orbital" | "Razer" | "Teevolution" | "ATK" | "VGN" | "Finalmouse" | "Keychron" | "moddoMOUSE" | "Ninjutso" | "Zaunkoenig" | "Fantech" | "Wooting" | "WALLHACK" | "MSI";

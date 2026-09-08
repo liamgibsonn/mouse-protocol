@@ -47,6 +47,10 @@ function collectionShapes(): HIDCollectionInfo[][] {
       }
     }
   }
+  // Vendor collections whose usage page or usage falls outside the sweep
+  // above. Added individually rather than by widening USAGE_PAGES, which
+  // multiplies the whole matrix and the runtime with it.
+  shapes.push([collection(0xff10, 0x06, { feature: [0] })]); // MSI Clutch GM41
   return shapes;
 }
 

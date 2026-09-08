@@ -35,7 +35,7 @@ import {
   WALLHACK_VENDOR_ID,
 } from "@openmouse/protocol/wallhack";
 
-import { MSI_PRODUCT_ID } from "@openmouse/protocol/msi";
+import { MSI_CONFIG_USAGE, MSI_CONFIG_USAGE_PAGE, MSI_PRODUCT_ID } from "@openmouse/protocol/msi";
 
 export const VENDOR_ID = {
   pulsar: 0x3710,
@@ -80,12 +80,17 @@ export const MODDO_HID_FILTERS: HIDDeviceFilter[] = [
   { vendorId: VENDOR_ID.moddo, usagePage: 0xff, usage: 0x02 },
 ];
 
-// MSI Clutch GM41. The vendor config interface's usagePage/usage has not
-// been confirmed on hardware yet (see the note in drivers/msi/hid.ts), so
-// this filters on product id alone for now — broader than ideal, but safe,
-// since MSI_PRODUCT_ID is a confirmed value.
+// MSI Clutch GM41. The mouse exposes three collections; only the vendor
+// config interface (0xff10/0x06, confirmed on hardware) carries feature
+// reports, so pin the picker to it — filtering on product id alone lists all
+// three and lets the user pick one Windows will not accept writes on.
 export const MSI_HID_FILTERS: HIDDeviceFilter[] = [
-  { vendorId: VENDOR_ID.msi, productId: MSI_PRODUCT_ID },
+  {
+    vendorId: VENDOR_ID.msi,
+    productId: MSI_PRODUCT_ID,
+    usagePage: MSI_CONFIG_USAGE_PAGE,
+    usage: MSI_CONFIG_USAGE,
+  },
 ];
 
 // The X3 family's control channel is the Sonix XS-1 interface: a single

@@ -449,6 +449,30 @@ Until then the entries stay: they are correct data, they cost nothing but a
 picker row, and a model that cannot be opened fails at `open()` with a clear
 browser error rather than doing anything harmful.
 
+### Viper V3 Pro — "failed to write feature report"
+
+A Viper V3 Pro (`0x00c0` wired, `0x00c1` receiver) has been reported stopping on
+Chrome's bare DOMException message "Failed to write feature report." — the same
+string as the protected-collection case above, on a model whose control
+interface is otherwise confirmed working. The first control command (the
+firmware read) hits the refused write first, so the whole status read aborts
+with no explanation. Work through the ordinary causes before blaming the
+protected collection:
+
+1. **Razer Synapse is running.** It holds the control interface and the write is
+   refused. Quit it and try again — this is by far the most common cause.
+2. **Wrong interface granted** on the `0x00c1` receiver. The two picker rows look
+   identical and the pointer collection refuses control writes; re-add the
+   device and pick the other row. On the cable there is only the one interface.
+3. **macOS Input Monitoring** — allow the browser under System Settings → Privacy
+   & Security → Input Monitoring, then re-add the device.
+4. Otherwise it is the protected-collection case above: capture the device's WebHID
+   `collections` dump and the exact error, and it needs the native/HAL transport.
+
+The driver now surfaces these steps in the read error instead of the bare
+browser string, so a repeat of this report should carry enough to tell cause 4
+apart from causes 1–3.
+
 ## DeathAdder Essential — not yet hardware-tested
 
 This model shares the 90-byte protocol above, so it reuses the same commands.
@@ -576,9 +600,16 @@ legacy encoding can express, so no HyperPolling command is missing there.
 
 The asymmetric pair write (`0x0b`/`0x05`) is armed by the unlock
 `0x0b`/`0x0b` `00 04 04 01` — the value Synapse sent on firmware 1.12. Firmware
-1.14 still accepts it; the Aug 12 capture that failed with status `0x03` did not
-reproduce on a fresh run with the same bytes, so it was transient or state-related
-rather than a firmware renumbering.
+1.14 still accepts it on the swept hardware.
+
+It is not universal. A reporter's Viper V3 Pro (HyperSpeed receiver, "Mouse
+1.14") refused the armed pair write with status `0x03` in **two** sessions —
+the Sep 5 capture reproduced the Aug 12 one byte-for-byte, so that failure was
+unit- or state-related, not the "transient" it was first written off as. The
+reporter's unit holds a stale asymmetric pair (26/25) while symmetric "Low" is
+active, its unarmed mode-probe pair write is refused on every connect without
+moving the stored pair, and the same `04 01` unlock that the sweep verified is
+echoed `0x02` before the pair write still comes back `0x03`.
 
 A standalone WebHID sweep over the sensor-setting table on 1.14 (HyperSpeed
 receiver) returned:
@@ -595,10 +626,15 @@ The calib-mode-on step (`0x0b`/`0x03` `00 04 01`) before the unlock is not
 required on this firmware. Both `04 01` and `04 00` arm the pair write with or
 without it, and the fixed/self-cal setting values never do.
 
-The code keeps `04 01`: it is verified on both 1.12 and 1.14, whereas `04 00`
-is verified only on 1.14. The canonical table entry (`04 00` = asymmetric Razer
-calibration) matching would be a cosmetic change with an unverified 1.12
-regression risk, so it stays as shipped.
+`setLiftOff` sends `04 01` first — verified on both 1.12 and 1.14, so the
+shipped path is unchanged on units where it works — and when the pair write is
+refused with `0x03` falls back in turn to the canonical `04 00` unlock (verified
+only on 1.14) and then to the calib-mode-on step followed by `04 01`. A refusal
+is safe to burn on either kind of unit: the swept unit answers a refused write
+by still moving the stored pair (the reason the read-back verifies), while the
+reporter's unit leaves it untouched. Which arm the reporter's unit actually
+accepts, if any, still needs a hands-on trial; the fallback chain exists so the
+attempt costs one extra click instead of a dead feature.
 
 ## Changing the polling rate reconfigures the link
 

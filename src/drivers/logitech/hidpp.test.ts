@@ -29,6 +29,7 @@ const G403_HERO = 0xc08f;
 const G703 = 0xc087;
 const G502 = 0xc07d;
 const G502_X_PLUS = 0xc095;
+const G502_X_LIGHTSPEED = 0xc098;
 const G502_X = 0xc099;
 const LIGHTSPEED_RECEIVER = 0xc54d;
 const SUPERSTRIKE_USB = 0xc0a8;
@@ -52,6 +53,7 @@ test("runtime probing alone classifies direct and receiver connections", () => {
 test("the G502 family direct USB interfaces are recognized", () => {
   assert.equal(isDirectConnectProduct(G502), true);
   assert.equal(isDirectConnectProduct(G502_X_PLUS), true);
+  assert.equal(isDirectConnectProduct(G502_X_LIGHTSPEED), true);
   assert.equal(isDirectConnectProduct(G502_X), true);
   assert.equal(isDirectConnectProduct(LIGHTSPEED_RECEIVER), false);
 });
@@ -218,17 +220,35 @@ function hidppResponder(roles: Record<number, "mouse" | "keyboard">) {
   };
 }
 
+const fakeCollection = (usagePage: number, usage: number): HIDCollectionInfo =>
+  ({ usagePage, usage, children: [] }) as unknown as HIDCollectionInfo;
+
+/** What a receiver or wired vendor interface exposes: HID++ short and long. */
+const USB_HIDPP_COLLECTIONS = [fakeCollection(0xff00, 0x0001), fakeCollection(0xff00, 0x0002)];
+
+/** What a Bluetooth-paired mouse exposes instead: one vendor collection, no 0xFF00. */
+const BLUETOOTH_HIDPP_COLLECTIONS = [fakeCollection(0xff43, 0x0202)];
+
 class FakeHidDevice {
   readonly productId: number;
   readonly productName: string;
+  // The driver reads these to tell a Bluetooth endpoint from a USB one, so a
+  // double without them silently answers "not Bluetooth" at best and throws at
+  // worst.
+  readonly collections: HIDCollectionInfo[];
   opened = false;
   readonly probed: Array<{ reportId: number; data: Uint8Array }> = [];
   private listeners = new Map<string, (event: unknown) => void>();
   onRequest: (request: Uint8Array) => Uint8Array | null = () => null;
 
-  constructor(productId: number, productName = "USB Receiver") {
+  constructor(
+    productId: number,
+    productName = "USB Receiver",
+    collections: HIDCollectionInfo[] = USB_HIDPP_COLLECTIONS,
+  ) {
     this.productId = productId;
     this.productName = productName;
+    this.collections = collections;
   }
 
   addEventListener(type: string, listener: (event: unknown) => void): void {
@@ -260,11 +280,15 @@ class FakeHidDevice {
   }
 }
 
-function harness(productId: number, roles: Record<number, "mouse" | "keyboard">): {
+function harness(
+  productId: number,
+  roles: Record<number, "mouse" | "keyboard">,
+  collections?: HIDCollectionInfo[],
+): {
   client: LogitechHidppClient;
   device: FakeHidDevice;
 } {
-  const device = new FakeHidDevice(productId);
+  const device = new FakeHidDevice(productId, "USB Receiver", collections);
   device.onRequest = hidppResponder(roles);
   return { client: new LogitechHidppClient(device as unknown as HIDDevice), device };
 }
@@ -277,6 +301,29 @@ async function resolveIndex(client: LogitechHidppClient): Promise<number | null>
   };
   await driver.open();
   await driver.resolveDeviceIndex();
+  return driver.resolvedDeviceIndex;
+}
+
+/**
+ * Simulates `readStatus()`'s own retry: clear the already-resolved (and, by
+ * the time a real caller does this, already proven sensorless) index and
+ * resolve again excluding it — same as `readStatus()` does when its
+ * post-resolution DPI check comes back empty.
+ */
+async function resolveIndexExcluding(
+  client: LogitechHidppClient,
+  excluded: ReadonlySet<number>,
+): Promise<number | null> {
+  const driver = client as unknown as {
+    open(): Promise<void>;
+    resolveDeviceIndex(excluded?: ReadonlySet<number>, priorAnsweredWithoutSensor?: boolean): Promise<void>;
+    resolvedDeviceIndex: number | null;
+  };
+  await driver.open();
+  driver.resolvedDeviceIndex = null;
+  // Mirrors readStatus()'s own call: excluding an index only ever happens
+  // because that index already answered-without-a-sensor.
+  await driver.resolveDeviceIndex(excluded, excluded.size > 0);
   return driver.resolvedDeviceIndex;
 }
 
@@ -319,4 +366,48 @@ test("a direct-connect mouse is latched on its own index without a sensor probe"
   const { client, device } = harness(G402, { 0xff: "mouse" });
   assert.equal(await resolveIndex(client), 0xff);
   assert.equal(device.probed.some(({ data }) => data[1] === 0x00 && ((data[3] << 8) | data[4]) === 0x2202), false);
+});
+
+test("a direct-connect product falls back to the receiver index when its own index has no sensor", async () => {
+  // Confirmed on real hardware (a PRO X Superlight): DEVICE_INDEX_DIRECT can
+  // answer HID++2.0 as a genuine admin/pass-through endpoint with no sensor
+  // behind it, while DEVICE_INDEX_RECEIVER — the very next candidate — is
+  // the mouse. `readStatus()` discovers this after the fact and re-resolves
+  // excluding the sensorless index; this simulates that second call.
+  const { client } = harness(G402, { 0xff: "keyboard", 0x01: "mouse" });
+  assert.equal(await resolveIndex(client), 0xff, "the fast path still trusts the first answer with no probe");
+  assert.equal(
+    await resolveIndexExcluding(client, new Set([0xff])),
+    0x01,
+    "excluding the sensorless index finds the mouse on the next candidate",
+  );
+});
+
+test("a direct-connect product with no sensor anywhere is reported as not a mouse", async () => {
+  const { client } = harness(G402, { 0xff: "keyboard" });
+  assert.equal(await resolveIndex(client), 0xff, "the fast path still trusts the first answer with no probe");
+  const error = await resolveIndexExcluding(client, new Set([0xff])).catch((reason) => reason);
+  assert.equal((error as Error).name, "NotAMouseError");
+});
+
+test("a Bluetooth mouse is addressed on long reports only", async () => {
+  // BLE declares report 0x11 and nothing else, so the short-report path that
+  // Lightspeed and wired mice use would be rejected by the device outright.
+  const { client, device } = harness(0xb042, { 0xff: "mouse" }, BLUETOOTH_HIDPP_COLLECTIONS);
+  assert.equal(await resolveIndex(client), 0xff);
+  assert.ok(device.probed.length > 0, "the index probe must have sent something");
+  assert.deepEqual(
+    [...new Set(device.probed.map(({ reportId }) => reportId))],
+    [0x11],
+    "every request over Bluetooth must go out as a long report",
+  );
+});
+
+test("a receiver-attached mouse keeps using short reports", async () => {
+  const { client, device } = harness(0xc547, { 0x01: "mouse" });
+  assert.equal(await resolveIndex(client), 0x01);
+  assert.ok(
+    device.probed.some(({ reportId }) => reportId === 0x10),
+    "the 0xFF00 short path is unchanged for receivers",
+  );
 });

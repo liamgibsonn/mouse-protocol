@@ -45,6 +45,8 @@ import {
   razerSetLiftOffCommand,
   razerSetTrackingDistanceCommand,
   razerEnableAsymmetricLiftOffCommand,
+  razerEnableAsymmetricLiftOffCanonicalCommand,
+  razerEnableSensorCalibrationCommand,
   razerSetLowPowerThresholdCommand,
   razerSetSleepTimeoutCommand,
   type RazerButtonControl,
@@ -616,14 +618,19 @@ export class RazerHidClient {
     // before landing, so an out-of-range lift-off still reports itself rather
     // than being masked by the landing it drags out of range here.
     const command = razerSetLiftOffCommand(liftOff, capped);
-    // The pair write is refused in symmetric mode — and refused while still
-    // moving what the read reports, so skipping this yields a driver that looks
-    // like it works and never reaches the sensor.
-    await this.request(razerEnableAsymmetricLiftOffCommand());
-    await this.request(command);
-    // Rejected writes on this command still disturb the stored pair, so the
-    // read-back is a genuine check, not a formality. Tracking is excluded — it
-    // was never part of the write.
+    // The pair write is refused in symmetric mode, so it is armed first. Units
+    // differ within the same "Mouse 1.14" version string: the 0x01 unlock is
+    // verified on the swept hardware, but a reporter's unit answered the armed
+    // pair write 0x03 in two separate sessions, so each refusal falls back to
+    // the next documented arm rather than giving up.
+    const arms = [
+      [razerEnableAsymmetricLiftOffCommand()],
+      [razerEnableAsymmetricLiftOffCanonicalCommand()],
+      [razerEnableSensorCalibrationCommand(), razerEnableAsymmetricLiftOffCommand()],
+    ];
+    await this.writePairArmed(command, arms);
+    // Some units answer a refused pair write by still moving the stored pair;
+    // others leave it untouched. Either way the read-back is a genuine check.
     const confirmed = decodeLiftOff(await this.request(RAZER_READ.liftOff));
     if (confirmed.liftOff !== liftOff || confirmed.landing !== capped) {
       throw new Error(`The mouse kept lift-off ${confirmed.liftOff} and landing ${confirmed.landing} instead of ${liftOff} and ${capped}.`);
@@ -631,6 +638,34 @@ export class RazerHidClient {
     this.asymmetric = true;
     this.asymmetricKnown = true;
     return confirmed;
+  }
+
+  /**
+   * Sends one arm sequence (setting writes) followed by the pair write, and
+   * returns on the first success. A refused arm is safe to burn — the units
+   * that refuse it read the stored pair back unchanged, and the pair write
+   * that follows restores any pair a refusal may have disturbed. When every
+   * arm fails, the last refusal propagates so the caller sees the refused
+   * command rather than a guessed substitution.
+   */
+  private async writePairArmed(command: RazerCommand, arms: RazerCommand[][]): Promise<void> {
+    let lastRefusal: RazerProtocolError | undefined;
+    for (const sequence of arms) {
+      for (const write of sequence) {
+        await this.request(write);
+      }
+      try {
+        await this.request(command);
+        return;
+      } catch (error) {
+        if (error instanceof RazerProtocolError && error.status === RAZER_STATUS.failure) {
+          lastRefusal = error;
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw lastRefusal ?? new RazerProtocolError(`The mouse refused the lift-off write after ${arms.length} attempts.`);
   }
 
   /**
@@ -698,11 +733,37 @@ export class RazerHidClient {
     // status read, which is what took the lift-off panel down after an 8,000 Hz
     // switch.
     for (let attempt = 0; attempt < RESPONSE_ATTEMPTS; attempt += 1) {
-      await this.device.sendFeatureReport(RAZER_REPORT_ID, request);
+      await this.write(command, request);
       const reply = await this.awaitReply(command);
       if (reply) return reply;
     }
     throw new Error("The mouse stayed busy — it may be asleep or out of range.");
+  }
+
+  /**
+   * Sends one protocol request as a feature report. Chrome reports a refused
+   * write as a bare `NotAllowedError` whose message is only "Failed to write
+   * feature report." with no hint about why, so the throw is wrapped with the
+   * troubleshooting paths that actually explain it: the control interface is
+   * held by another program (Razer Synapse), the interface granted on the
+   * wireless receiver is the pointer collection rather than the control one,
+   * macOS has denied the browser Input Monitoring access, or the OS/browser
+   * refuses writes to mouse-class collections outright.
+   */
+  private async write(command: RazerCommand, request: Uint8Array<ArrayBuffer>): Promise<void> {
+    try {
+      await this.device.sendFeatureReport(RAZER_REPORT_ID, request);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Chrome could not write the ${this.displayName()}'s feature report (command 0x${command.commandClass
+          .toString(16)}/${command.commandId.toString(16)}). `
+          + "Quit Razer Synapse and try again — it holds the control interface. If it still fails, "
+          + "re-add the device and pick the other Razer Viper interface on the receiver, and on macOS "
+          + "allow the browser under System Settings → Privacy & Security → Input Monitoring. "
+          + `(${detail})`,
+      );
+    }
   }
 
   /**

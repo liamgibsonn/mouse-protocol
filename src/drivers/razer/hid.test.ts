@@ -32,6 +32,14 @@ interface FakeOptions {
   productId?: number;
   /** DPI pair the fake reports, defaulting to 1600 × 1600. */
   dpi?: [number, number];
+  /**
+   * The `0x0b`/`0x0b` value that actually arms the pair write. Defaults to
+   * 0x01; a unit that refuses that form but accepts the canonical 0x00 models
+   * the reporter's hardware.
+   */
+  asymmetricArmValue?: number;
+  /** Require the `0x0b`/`0x03` calibration step before a pair write lands. */
+  calibOnRequired?: boolean;
 }
 
 function replyPacket(commandClass: number, commandId: number, dataSize: number, args: number[], status: number): Uint8Array {
@@ -55,6 +63,7 @@ function fakeMouse(state: FakeLiftOff, options: FakeOptions = {}) {
   const sent: Uint8Array[] = [];
   let pending = new Uint8Array(RAZER_PACKET_LENGTH);
   let corruptRemaining = options.corruptSends ?? 0;
+  let calibratedOn = false;
   let dpi = options.dpi ?? [1600, 1600];
   let pollingDivisor = 8;
   const device = {
@@ -93,14 +102,16 @@ function fakeMouse(state: FakeLiftOff, options: FakeOptions = {}) {
       const liftOffWrite = commandClass === 0x0b && commandId === 0x05;
       const liftOffRead = commandClass === 0x0b && commandId === 0x85;
       const settingWrite = commandClass === 0x0b && commandId === 0x0b;
+      const calibWrite = commandClass === 0x0b && commandId === 0x03;
       // The real mouse refuses the pair write unless asymmetric mode is on, and
       // leaves it again whenever a tracking level is written.
-      if (settingWrite && data[10] === 0x04) state.asymmetric = data[11] === 0x01;
+      if (settingWrite && data[10] === 0x04) state.asymmetric = data[11] === (options.asymmetricArmValue ?? 0x01);
       if (settingWrite && data[10] === 0x01 && !options.ignoreWrites) {
         state.tracking = data[11];
         state.asymmetric = false;
       }
-      if (liftOffWrite && !state.asymmetric) {
+      if (calibWrite) calibratedOn = true;
+      if (liftOffWrite && (!state.asymmetric || (options.calibOnRequired && !calibratedOn))) {
         pending = replyPacket(commandClass, commandId, data[5], [], RAZER_STATUS.failure);
         return;
       }
@@ -401,6 +412,53 @@ test("the lift-off write unlocks asymmetric mode first, then uses the captured f
   assert.deepEqual(confirmed, { tracking: "High", liftOff: 16, landing: 11 });
 });
 
+test("a unit that refuses the shipped arm accepts the canonical fallback", async () => {
+  // On the reporter's unit the documented 0x01 unlock still answers the armed
+  // pair write 0x03, across two sessions. The canonical 0x00 form is the first
+  // documented fallback, so the write must not give up after the first refusal.
+  // Arrange
+  const { client, sent } = fakeMouse({ tracking: 2, liftOff: 26, landing: 25, asymmetric: false }, { asymmetricArmValue: 0x00 });
+
+  // Act
+  const confirmed = await client.setLiftOff(16, 11);
+
+  // Assert
+  assert.deepEqual(confirmed, { tracking: "High", liftOff: 16, landing: 11 });
+  const arms = sent.filter((packet) => packet[6] === 0x0b && packet[7] === 0x0b);
+  assert.deepEqual([...arms[0].slice(8, 12)], [0x00, 0x04, 0x04, 0x01]);
+  assert.deepEqual([...arms[1].slice(8, 12)], [0x00, 0x04, 0x04, 0x00]);
+});
+
+test("a unit that refuses both unlock values takes the calibration step", async () => {
+  // The calib-mode-on step (`0x0b`/`0x03` `00 04 01`) precedes the unlock as
+  // the last-resort arm; on the swept firmware it is not required, so this is
+  // only exercised on a unit that refuses the pair write after either unlock.
+  // Arrange
+  const { client, sent } = fakeMouse({ tracking: 2, liftOff: 26, landing: 25, asymmetric: false }, { calibOnRequired: true });
+
+  // Act
+  const confirmed = await client.setLiftOff(16, 11);
+
+  // Assert
+  assert.deepEqual(confirmed, { tracking: "High", liftOff: 16, landing: 11 });
+  const calibration = sent.find((packet) => packet[6] === 0x0b && packet[7] === 0x03);
+  assert.ok(calibration, "the calibration arm was never sent");
+  assert.deepEqual([...calibration.slice(8, 11)], [0x00, 0x04, 0x01]);
+});
+
+test("a unit that refuses every arm reports the refused pair write", async () => {
+  // A unit that needs the calibration step but only honours the canonical arm
+  // defeats all three sequences; the refusal must surface as the class 0x0b
+  // command 0x05 status, not as a guessed message.
+  // Arrange
+  const { client, sent } = fakeMouse({ tracking: 2, liftOff: 26, landing: 25, asymmetric: false }, { calibOnRequired: true, asymmetricArmValue: 0x00 });
+
+  // Act / Assert
+  await assert.rejects(() => client.setLiftOff(16, 11), /Class 0x0b command 0x05 returned status 0x03/);
+  // Three arm sequences, the last ending in the pair write that was refused.
+  assert.equal(sent.length, 7);
+});
+
 test("landing is capped below lift-off rather than rejected", async () => {
   // Lowering lift-off past an already-set landing is ordinary use of a pair of
   // controls; the protocol layer would throw on the inverted pair.
@@ -532,13 +590,16 @@ test("the DeathAdder V2 is accepted on either interface shape", () => {
 });
 
 test("a nativeOnly model is never accepted, whatever the interface shape", () => {
-  // The DeathAdder V4 Pro 0x00be has its control channel on a collection the
-  // browser refuses to expose. A granted device may still enumerate through
-  // getDevices()/auto-reconnect, so isSupported must refuse it regardless.
+  // The Viper Ultimate wireless receiver 0x007b has its control channel on a
+  // collection the browser refuses to expose. A granted device may still
+  // enumerate through getDevices()/auto-reconnect, so isSupported must refuse
+  // it regardless. (The DeathAdder V4 Pro used to be this test's example —
+  // Razer's own live AvailableDevices.json now lists it, so it's no longer
+  // nativeOnly; see devices.ts.)
   // Arrange
   const mouse = {
     vendorId: 0x1532,
-    productId: 0x00be,
+    productId: 0x007b,
     collections: [{ usagePage: 0x01, usage: 0x02, featureReports: [], children: [] }],
   } as unknown as HIDDevice;
   const vendor = {
@@ -655,4 +716,36 @@ test("HyperPolling dongle commits an 8 kHz change through both selectors", async
   assert.deepEqual([write[1], write[6], write[7], write[8], write[9]], [0x1f, 0x00, 0x40, 0x00, 0x01]);
   assert.deepEqual([commit[1], commit[6], commit[7], commit[8], commit[9]], [0xff, 0x00, 0x40, 0x01, 0x01]);
   assert.deepEqual([confirm[1], confirm[6], confirm[7]], [0x1f, 0x00, 0xc0]);
+});
+
+test("a Chrome-refused feature-report write surfaces troubleshooting, not the bare DOMException", async () => {
+  // The reported Viper V3 Pro symptom — "failed to write feature report" — is
+  // Chrome's own `sendFeatureReport` rejection, which carries no explanation.
+  // The very first control command (the firmware read) hits it first, so the
+  // whole status read aborts: the read must surface what to do, not the bare
+  // string. Arrange: every write is refused, the way a Synapse-held control
+  // interface or a Chrome-protected mouse collection refuses them.
+  const device = {
+    vendorId: 0x1532,
+    productId: 0x00c1,
+    productName: "Razer Viper V3 Pro",
+    opened: true,
+    collections: [{ usagePage: 0x01, usage: 0x02, children: [], featureReports: [], inputReports: [], outputReports: [] }],
+    open: async () => {},
+    close: async () => {},
+    sendFeatureReport: async () => {
+      throw new DOMException("Failed to write feature report.", "NotAllowedError");
+    },
+    receiveFeatureReport: async () => new DataView(new Uint8Array(RAZER_PACKET_LENGTH).buffer),
+  } as unknown as HIDDevice;
+  const client = new RazerHidClient(device);
+
+  await assert.rejects(client.readStatus(), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /Viper V3 Pro/);
+    assert.match(error.message, /Failed to write feature report/);
+    assert.match(error.message, /Quit Razer Synapse/);
+    assert.match(error.message, /other Razer Viper interface/);
+    return true;
+  });
 });

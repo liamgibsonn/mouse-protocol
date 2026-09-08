@@ -1,10 +1,11 @@
 import type { MouseLighting, MouseStatus } from "../mouse-types.ts";
-import { LOGITECH_RECEIVER_PRODUCT_IDS } from "../vendors.ts";
+import { LOGITECH_BLUETOOTH_FILTERS, LOGITECH_RECEIVER_FILTERS, LOGITECH_RECEIVER_PRODUCT_IDS } from "../vendors.ts";
 import {
   BOLT_INDEX_PROBE_TIMEOUT_MS,
   boltSupportScore,
   classifyHidpp20Probe,
   collapseBoltPeers,
+  hasHidppBluetoothCollection,
   hasHidppLongCollection,
   hasHidppShortCollection,
   resolveBoltReportDevice,
@@ -73,6 +74,7 @@ import {
 
 export {
   collapseBoltPeers,
+  hasHidppBluetoothCollection,
   hasHidppLongCollection,
   hasHidppShortCollection,
 } from "./bolt.ts";
@@ -94,6 +96,8 @@ import {
   decodeOnboardProfile,
   describeProfileFormat,
   dpiStageCapabilitiesForOptions,
+  isProfileWritable,
+  isLodWritableForProduct,
   encodeDpiStages,
   encodeButtonAssignment,
   encodeMacroButtonAssignment,
@@ -229,6 +233,20 @@ class HidppTimeoutError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "HidppTimeoutError";
+  }
+}
+
+/**
+ * The mouse answered the live report-rate write with an explicit HID++
+ * rejection (as opposed to a timeout, or a confirmation that never arrived).
+ * setPollingRate uses this to decide whether falling back to the onboard
+ * profile write is safe — only a genuine rejection means the live write did
+ * not take effect.
+ */
+class LiveRateWriteRejectedError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "The mouse rejected the live report-rate write.");
+    this.name = "LiveRateWriteRejectedError";
   }
 }
 
@@ -467,11 +485,20 @@ export class LogitechHidppClient {
    * field initializers before the `device` parameter property is assigned.
    */
   private get isDirectConnect(): boolean {
-    return isDirectConnection(this.resolvedDeviceIndex);
+    // A Bluetooth mouse also answers on 0xFF, because over BLE it really is the
+    // endpoint, but nothing this flag gates is true of it. Onboard-profile
+    // writes, short-report DPI and the "Wired USB" label all describe a *wired*
+    // vendor interface, so Bluetooth takes the receiver-style paths instead.
+    return !this.isBluetooth && isDirectConnection(this.resolvedDeviceIndex);
   }
 
   private get isBoltReceiver(): boolean {
     return isBoltReceiverProduct(this.device.productId);
+  }
+
+  /** @see hasHidppBluetoothCollection */
+  private get isBluetooth(): boolean {
+    return hasHidppBluetoothCollection(this.device);
   }
 
   /** HID++ device index: a receiver pairing slot, or the mouse itself. */
@@ -499,21 +526,38 @@ export class LogitechHidppClient {
    * So ask. The root feature query is the cheapest request there is, and the
    * wrong index simply times out.
    */
-  private async resolveDeviceIndex(): Promise<void> {
+  private async resolveDeviceIndex(
+    excluded?: ReadonlySet<number>,
+    priorAnsweredWithoutSensor = false,
+  ): Promise<void> {
     if (this.resolvedDeviceIndex !== null) return;
     const receiverAttached = KNOWN_RECEIVER_PRODUCT_IDS.has(this.device.productId);
-    const candidates = hidppDeviceIndexCandidates(receiverAttached);
+    const candidates = hidppDeviceIndexCandidates(receiverAttached)
+      .filter((candidate) => !excluded?.has(candidate));
 
     // A merged receiver can carry a keyboard on a lower slot than the mouse.
     // Keyboards answer the same HID++ queries, so an answering slot only counts
-    // once it proves it has a sensor; a direct connection has a single endpoint
-    // and is latched as before, with readStatus deciding whether it is a mouse.
-    let answeredWithoutSensor = false;
+    // once it proves it has a sensor; a direct connection is latched on its
+    // first HID++2.0 answer without that extra round trip — correct for the
+    // common case, where a "direct connect" product id really does have one
+    // dedicated endpoint, but not universally true: confirmed on real
+    // hardware (a PRO X Superlight), DEVICE_INDEX_DIRECT can be an
+    // admin/pass-through endpoint that answers the root feature query with
+    // no sensor behind it, while DEVICE_INDEX_RECEIVER — the very next
+    // candidate — is the mouse itself. `readStatus()` catches that after the
+    // fact (its own dpiFeature check) and calls this again with the
+    // sensorless index in `excluded` (and `priorAnsweredWithoutSensor: true`,
+    // since that index answering-without-a-sensor is *why* it's excluded —
+    // this call's own loop never revisits it to rediscover that itself); on
+    // that retry there is no "trust the first answer" shortcut left to take,
+    // so every remaining candidate gets the same sensor check a
+    // receiver-attached probe always got.
+    let answeredWithoutSensor = priorAnsweredWithoutSensor;
     for (const candidate of candidates) {
       this.resolvedDeviceIndex = candidate;
       const outcome = await this.probeHidpp20Root();
       if (outcome !== "hidpp20") continue;
-      if (!receiverAttached) return;
+      if (!receiverAttached && !excluded) return;
       answeredWithoutSensor = true;
       if (await this.hasDpiFeature()) return;
     }
@@ -561,7 +605,9 @@ export class LogitechHidppClient {
    */
   static isSupported(device: HIDDevice): boolean {
     if (device.vendorId !== LOGITECH_VENDOR_ID) return false;
-    return hasHidppShortCollection(device) || hasHidppLongCollection(device);
+    return hasHidppShortCollection(device)
+      || hasHidppLongCollection(device)
+      || hasHidppBluetoothCollection(device);
   }
 
   /**
@@ -588,11 +634,10 @@ export class LogitechHidppClient {
       throw new Error("WebHID is unavailable. Use Chrome or Edge on desktop.");
     }
 
+    // The shared lists, not a second copy: a Bluetooth filter added to one and
+    // not the other is how the mouse stayed invisible on this path.
     const devices = await navigator.hid.requestDevice({
-      filters: [
-        { vendorId: LOGITECH_VENDOR_ID, usagePage: 0xff00, usage: 0x0001 },
-        { vendorId: LOGITECH_VENDOR_ID, usagePage: 0xff00, usage: 0x0002 },
-      ],
+      filters: [...LOGITECH_RECEIVER_FILTERS, ...LOGITECH_BLUETOOTH_FILTERS],
     });
     const ranked = [...devices]
       .filter((device) => this.isSupported(device))
@@ -631,7 +676,18 @@ export class LogitechHidppClient {
     // the picker cannot filter them out by descriptor. A sensor feature is what
     // actually distinguishes a mouse, and it is only knowable once connected.
     if (!dpiFeature.index) {
-      throw new NotAMouseError(this.device.productName || "That Logitech device");
+      // `resolveDeviceIndex()`'s direct-connect fast path trusts the first
+      // HID++2.0-answering index without a sensor probe — cheap and correct
+      // for the common case, but confirmed wrong on real hardware (a PRO X
+      // Superlight whose DEVICE_INDEX_DIRECT is an admin/pass-through
+      // endpoint with no sensor while DEVICE_INDEX_RECEIVER, the very next
+      // candidate, is the mouse itself). Retry properly — this time with a
+      // sensor check on every remaining candidate — before concluding this
+      // interface really isn't a mouse.
+      const sensorless = this.resolvedDeviceIndex;
+      this.resolvedDeviceIndex = null;
+      await this.resolveDeviceIndex(sensorless === null ? undefined : new Set([sensorless]), sensorless !== null);
+      return this.readStatus();
     }
     const reportRateFeature = await this.resolveReportRateFeature();
     const profilesFeature = await this.getFeature(FEATURE.onboardProfiles);
@@ -714,8 +770,7 @@ export class LogitechHidppClient {
     // only change once that format is verified and actually carries a
     // report-rate field. Anything else stays read-only.
     const profileRateWritable = this.isDirectConnect
-      && this.profileFormatId !== null
-      && describeProfileFormat(this.profileFormatId).writable
+      && isProfileWritable(this.profileFormatId)
       && capabilitiesForFormat(this.profileFormatId).reportRates !== null;
     const liftOffDistance = decodeLiftOffLevel(dpiState.lod, this.lodCapabilities);
     const hasLiveLiftOffControl = !dpiFeature.legacy && dpiCapabilities.liftOff;
@@ -803,9 +858,11 @@ export class LogitechHidppClient {
       // for Logi Bolt (BLE-based) versus Lightspeed.
       connectionDetail: this.isDirectConnect
         ? "Wired USB"
-        : this.isBoltReceiver
-          ? "Logi Bolt"
-          : undefined,
+        : this.isBluetooth
+          ? "Bluetooth"
+          : this.isBoltReceiver
+            ? "Logi Bolt"
+            : undefined,
       activeProfile: profileState.activeProfile,
       deviceMode: profileState.deviceMode,
       unitId: identity.unitId,
@@ -901,7 +958,16 @@ export class LogitechHidppClient {
   }
 
   private async readColorLedLighting(featureIndex: number): Promise<MouseLighting[]> {
-    const info = await this.request(featureIndex, 0x00);
+    // The feature can be advertised (a nonzero index from root discovery)
+    // without actually being readable — confirmed on a Pro X Superlight,
+    // which has no RGB lighting at all yet still resolves this feature index
+    // and rejects the info read with HID++ error 0x05. Every other optional
+    // read in readStatus degrades gracefully instead of throwing (see the
+    // per-zone current-color read further down, and the profile-format probe
+    // in readStatus itself); this one didn't, so it took the whole connection
+    // down with it.
+    const info = await this.request(featureIndex, 0x00).catch(() => null);
+    if (!info) return [];
     const count = Math.min(info[3] ?? 0, 8);
     const readable = ((((info[6] ?? 0) << 8) | (info[7] ?? 0)) & 1) !== 0;
     this.colorLedZones = [];
@@ -932,15 +998,6 @@ export class LogitechHidppClient {
   }
 
   async setPollingRate(pollingRateHz: number): Promise<number> {
-    if (this.isDirectConnect) {
-      // 0x8060's setter rejects live writes on this generation (HID++ error
-      // 0x02), and the persistent rate lives in the onboard profile anyway.
-      // Write the active profile's report-rate byte; encodeReportRate validates
-      // the value against the format the mouse reported. This costs one sector
-      // erase/write cycle.
-      await this.writeActiveProfile({ reportRateWiredHz: pollingRateHz });
-      return pollingRateHz;
-    }
     const rateLimits = this.lodCapabilities.reportRates;
     const connectionRateCeiling = rateLimits
       ? (this.wiredConnection ? rateLimits.wiredMaxHz : rateLimits.wirelessMaxHz)
@@ -949,21 +1006,65 @@ export class LogitechHidppClient {
       throw new Error(`This connection supports up to ${connectionRateCeiling} Hz.`);
     }
     const resolved = await this.resolveReportRateFeature();
-    if (resolved.legacy) {
-      return this.setLegacyReportRate(resolved.index, pollingRateHz);
+
+    if (!this.isDirectConnect) {
+      if (resolved.legacy) {
+        return this.setLegacyReportRate(resolved.index, pollingRateHz);
+      }
+      return this.setExtendedReportRate(resolved.index, pollingRateHz);
     }
+
+    // A direct-connect mouse's persistent rate also lives in the onboard
+    // profile, and one Logitech generation (the Superlight-era boards this
+    // fallback was built for) rejects the live 0x8060/0x8061 write outright
+    // with HID++ error 0x02. But every other Logitech tool (Solaar, libratbag)
+    // always uses the live feature unconditionally and reports no such
+    // rejection on other generations — so try it first here too, the same as
+    // a non-direct-connect mouse, and only fall back to the profile write
+    // (one sector erase/write cycle) if the live attempt actually fails. That
+    // gives a device whose generation accepts the live write a real shot at
+    // it instead of skipping straight to a profile format that may not even
+    // be writable yet (e.g. format 8's Superstrike).
+    if (resolved.index) {
+      try {
+        if (resolved.legacy) {
+          return await this.setLegacyReportRate(resolved.index, pollingRateHz);
+        }
+        return await this.setExtendedReportRate(resolved.index, pollingRateHz);
+      } catch (error) {
+        // Only an explicit on-device rejection of the write itself falls back
+        // to the profile write. A confirmation timeout (the write was ACKed
+        // but the follow-up notification never arrived, or the legacy path
+        // read back a stale rate) is not proof the write failed, so retrying
+        // via a second, profile-based write there risks writing over a rate
+        // the mouse already accepted. HidppTimeoutError is the transport-
+        // level "no reply at all" case, equally not a rejection.
+        if (!(error instanceof LiveRateWriteRejectedError)) throw error;
+      }
+    }
+    // No live feature at all, or the live write was explicitly rejected.
+    // encodeReportRate validates the value against the format the mouse
+    // reported, so a genuinely unsupported rate still surfaces there.
+    await this.writeActiveProfile({ reportRateWiredHz: pollingRateHz });
+    return pollingRateHz;
+  }
+
+  private async setExtendedReportRate(featureIndex: number, pollingRateHz: number): Promise<number> {
     const rateIndex = REPORT_RATE_HZ.indexOf(pollingRateHz as (typeof REPORT_RATE_HZ)[number]);
     if (rateIndex < 0) {
       throw new Error("Unsupported polling rate.");
     }
-
     await this.ensureHostControl();
-    const feature = await this.getFeature(FEATURE.extendedReportRate);
-    if (!feature.index) {
+    const feature = featureIndex || (await this.getFeature(FEATURE.extendedReportRate)).index;
+    if (!feature) {
       throw new Error("This mouse does not expose report-rate controls.");
     }
     const confirmation = this.waitForRateChange(pollingRateHz);
-    await this.request(feature.index, 0x30, rateIndex);
+    try {
+      await this.request(feature, 0x30, rateIndex);
+    } catch (error) {
+      throw error instanceof HidppTimeoutError ? error : new LiveRateWriteRejectedError(error);
+    }
     await confirmation;
     return pollingRateHz;
   }
@@ -1288,7 +1389,7 @@ export class LogitechHidppClient {
     }
     const info = parseProfilesInfo(await this.request(feature.index, PROFILE_FN.getInfo));
     const format = describeProfileFormat(info.profileFormatId);
-    if (!format.writable) {
+    if (!isProfileWritable(format.id)) {
       throw new Error(`Profile format ${format.id} profile-content writes have not been verified on hardware.`);
     }
 
@@ -1401,7 +1502,8 @@ export class LogitechHidppClient {
           throw new Error(`Slot ${index + 1} uses a DPI value the connected mouse did not advertise.`);
         }
       }
-      updated = encodeDpiStages(updated, formatId, values.dpiStages, dpiCapabilities);
+      const writeLod = isLodWritableForProduct(formatId, this.device.productId);
+      updated = encodeDpiStages(updated, formatId, values.dpiStages, dpiCapabilities, writeLod);
     }
 
     // The two links are stored separately, so each is set on its own.
@@ -2712,7 +2814,11 @@ export class LogitechHidppClient {
     }
     await this.ensureHostControl();
     // setReportRate(rateMs).
-    await this.request(featureIndex, 0x20, rateMs);
+    try {
+      await this.request(featureIndex, 0x20, rateMs);
+    } catch (error) {
+      throw error instanceof HidppTimeoutError ? error : new LiveRateWriteRejectedError(error);
+    }
     const confirmed = await this.readLegacyReportRate(featureIndex);
     if (confirmed !== pollingRateHz) {
       throw new Error(`The mouse kept ${confirmed} Hz instead of ${pollingRateHz} Hz.`);
@@ -3076,10 +3182,12 @@ export class LogitechHidppClient {
     parameters: number[],
     options: { timeoutMs?: number } = {},
   ): Promise<Uint8Array> {
-    // Bolt feature traffic only answers on long reports. Lightspeed and wired
-    // mice keep the short form for the three-parameter path they were verified
-    // with; longer payloads still go through requestLong.
-    if (this.isBoltReceiver) {
+    // Bolt feature traffic only answers on long reports, and Bluetooth has no
+    // short report at all: its descriptor declares report 0x11 alone, so a
+    // sendReport(0x10) is rejected outright. Lightspeed and wired mice keep the
+    // short form for the three-parameter path they were verified with; longer
+    // payloads still go through requestLong.
+    if (this.isBoltReceiver || this.isBluetooth) {
       return this.requestLong(featureIndex, functionId, parameters, options.timeoutMs);
     }
     if (parameters.length > 3) {
@@ -3136,7 +3244,7 @@ export class LogitechHidppClient {
         }
         reject(new HidppTimeoutError(this.isDirectConnect
           ? "The mouse did not answer. Close Logitech G HUB or Logitech Gaming Software, then try again."
-          : this.isBoltReceiver
+          : this.isBoltReceiver || this.isBluetooth
             ? "The mouse did not answer. Move it, close Logi Options+, then try again."
             : "The mouse did not answer. Move it or click a button, then try again."));
       }, timeoutMs);

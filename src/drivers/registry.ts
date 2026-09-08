@@ -1,10 +1,13 @@
+import { AtkBitmouseHidClient } from "./atk/bitmouse-hid.ts";
 import { AtkHidClient } from "./atk/hid.ts";
 import { AttackSharkHidClient } from "./attackshark/hid.ts";
 import { EggOp1HidClient } from "./endgame/egg-op1-hid.ts";
 import { FantechHidClient } from "./fantech/hid.ts";
+import { GearHubHidClient } from "./gearhub/hid.ts";
 import { eggWeCreate, eggWeIsSupported, eggWeSupportScore, isEggWeClient, type EggWeHidClient } from "./endgame/egg-we-control.ts";
 import { FinalmouseHidClient } from "./finalmouse/hid.ts";
-import { KeychronHidClient } from "./keychron/hid.ts";
+import { KeychronM6HidClient } from "./keychron/m6-hid.ts";
+import { KeychronNapeHidClient } from "./keychron/nape-hid.ts";
 import { LamzuHidClient } from "./lamzu/hid.ts";
 import { LogitechHidppClient } from "./logitech/hidpp.ts";
 import { ModdoHidClient } from "./moddo/hid.ts";
@@ -26,10 +29,28 @@ import { WallhackMouseHidClient } from "./wallhack/mouse-hid.ts";
 import { WLMouseHidClient } from "./wlmouse/hid.ts";
 import { WootingHidClient } from "./wooting/hid.ts";
 import { ZaunkoenigHidClient } from "./zaunkoenig/hid.ts";
+import { CorsairHidClient } from "./corsair/hid.ts";
 import { GWolvesHidClient } from "./gwolves/hid.ts";
+import { SteelSeriesRival3HidClient } from "./steelseries/hid.ts";
+import { SteelSeriesAerox3HidClient } from "./steelseries/aerox3-hid.ts";
+import { SteelSeriesRival3WirelessHidClient } from "./steelseries/rival3-wireless-hid.ts";
+import { SteelSeriesAerox5HidClient } from "./steelseries/aerox5-hid.ts";
+import { SteelSeriesAerox5WirelessHidClient } from "./steelseries/aerox5-wireless-hid.ts";
+import { SteelSeriesRival650HidClient } from "./steelseries/rival650-hid.ts";
+import { SteelSeriesAerox9WirelessHidClient } from "./steelseries/aerox9-wireless-hid.ts";
+import { SteelSeriesRival310HidClient } from "./steelseries/rival310-hid.ts";
+import { SteelSeriesPrimePlusHidClient } from "./steelseries/prime-plus-hid.ts";
+import { SteelSeriesPrimeMiniWirelessHidClient } from "./steelseries/prime-mini-wireless-hid.ts";
+import { SteelSeriesSenseiTenHidClient } from "./steelseries/sensei-ten-hid.ts";
+import { GloriousHidClient } from "./glorious/hid.ts";
+import { GloriousClassicHidClient } from "./glorious/classic-hid.ts";
+import { MchoseHidClient } from "./mchose/hid.ts";
+import { MchoseDockHidClient } from "./mchose/dock-hid.ts";
+import { KsnakeHidClient } from "./ksnake/hid.ts";
+import { MicrosoftHidClient } from "./microsoft/hid.ts";
 
 export type PulsarClient = PulsarHidClient | PulsarProHidClient | PulsarXs1HidClient;
-export type SupportedClient = LogitechHidppClient | PulsarClient | EggOp1HidClient | EggWeHidClient | FinalmouseHidClient | WLMouseHidClient | LamzuHidClient | OrbitalHidClient | RazerHidClient | RazerViperHidClient | RazerViperMiniHidClient | RazerViperV4ProHidClient | RazerCobraHidClient | TeevolutionHidClient | AtkHidClient | VgnF2HidClient | KeychronHidClient | ModdoHidClient | NinjutsoHidClient | ZaunkoenigHidClient | AttackSharkHidClient | FantechHidClient | WootingHidClient | WallhackMouseHidClient | WallhackKeyboardHidClient | GWolvesHidClient | MsiHidClient;
+export type SupportedClient = LogitechHidppClient | PulsarClient | EggOp1HidClient | EggWeHidClient | FinalmouseHidClient | WLMouseHidClient | LamzuHidClient | OrbitalHidClient | RazerHidClient | RazerViperHidClient | RazerViperMiniHidClient | RazerViperV4ProHidClient | RazerCobraHidClient | TeevolutionHidClient | AtkHidClient | AtkBitmouseHidClient | VgnF2HidClient | KeychronM6HidClient | KeychronNapeHidClient | ModdoHidClient | NinjutsoHidClient | ZaunkoenigHidClient | CorsairHidClient | AttackSharkHidClient | FantechHidClient | GearHubHidClient | WootingHidClient | WallhackMouseHidClient | WallhackKeyboardHidClient | GWolvesHidClient | SteelSeriesRival3HidClient | SteelSeriesAerox3HidClient | SteelSeriesRival3WirelessHidClient | SteelSeriesAerox5HidClient | SteelSeriesAerox5WirelessHidClient | SteelSeriesRival650HidClient | SteelSeriesAerox9WirelessHidClient | SteelSeriesRival310HidClient | SteelSeriesPrimePlusHidClient | SteelSeriesPrimeMiniWirelessHidClient | SteelSeriesSenseiTenHidClient | GloriousHidClient | GloriousClassicHidClient | MchoseHidClient | MchoseDockHidClient | KsnakeHidClient | MicrosoftHidClient | MsiHidClient;
 
 export interface DeviceDriver {
   brand: string;
@@ -40,6 +61,7 @@ export interface DeviceDriver {
 
 export const DEVICE_DRIVERS: readonly DeviceDriver[] = [
   { brand: "Zaunkoenig", supports: (device) => ZaunkoenigHidClient.isSupported(device), create: (device) => new ZaunkoenigHidClient(device), score: () => 10 },
+  { brand: "Corsair", supports: (device) => CorsairHidClient.isSupported(device), create: (device) => new CorsairHidClient(device), score: () => 8 },
   { brand: "Finalmouse", supports: (device) => FinalmouseHidClient.isSupported(device), create: (device) => new FinalmouseHidClient(device), score: () => 10 },
   { brand: "Endgame Gear", supports: (device) => EggOp1HidClient.isSupported(device), create: (device) => new EggOp1HidClient(device), score: () => 10 },
   { brand: "Endgame Gear", supports: eggWeIsSupported, create: eggWeCreate, score: eggWeSupportScore },
@@ -58,15 +80,42 @@ export const DEVICE_DRIVERS: readonly DeviceDriver[] = [
   { brand: "Razer", supports: (device) => RazerCobraHidClient.isSupported(device), create: (device) => new RazerCobraHidClient(device), score: () => 6 },
   { brand: "Razer", supports: (device) => RazerViperMiniHidClient.isSupported(device), create: (device) => new RazerViperMiniHidClient(device), score: () => 6 },
   { brand: "Razer", supports: (device) => RazerViperHidClient.isSupported(device), create: (device) => new RazerViperHidClient(device), score: () => 6 },
+  { brand: "ATK", supports: (device) => AtkBitmouseHidClient.isSupported(device), create: (device) => new AtkBitmouseHidClient(device), score: () => 7 },
   { brand: "ATK", supports: (device) => AtkHidClient.isSupported(device), create: (device) => new AtkHidClient(device), score: () => 5 },
   { brand: "Attack Shark", supports: (device) => AttackSharkHidClient.isSupported(device), create: (device) => new AttackSharkHidClient(device), score: () => 5 },
   { brand: "Razer", supports: (device) => RazerViperV4ProHidClient.isSupported(device), create: (device) => new RazerViperV4ProHidClient(device), score: () => 7 },
-  { brand: "Keychron", supports: (device) => KeychronHidClient.isSupported(device), create: (device) => new KeychronHidClient(device), score: () => 6 },
+  { brand: "Keychron", supports: (device) => KeychronM6HidClient.isSupported(device), create: (device) => new KeychronM6HidClient(device), score: () => 7 },
+  { brand: "Keychron", supports: (device) => KeychronNapeHidClient.isSupported(device), create: (device) => new KeychronNapeHidClient(device), score: () => 6 },
+  // Ahead of Fantech: GearHub-V5 mice (Lingbao M5 Pro, Attack Shark R2, …)
+  // answer on the same VID 0x3151, usage page 0xFFFF, usage 0x02 interface
+  // that FantechHidClient claims, but need the 2.4G relay handshake and the
+  // Bit7 checksum that driver has no notion of. Scoped to the two receiver
+  // product ids so it cannot shadow Fantech's own hardware. The client
+  // identifies the specific model from the device id after connecting; the
+  // registry label is the M5 Pro's brand (the fallback identity).
+  { brand: "Lingbao", supports: (device) => GearHubHidClient.isSupported(device), create: (device) => new GearHubHidClient(device), score: () => 7 },
   { brand: "Fantech", supports: (device) => FantechHidClient.isSupported(device), create: (device) => new FantechHidClient(device), score: () => 5 },
   { brand: "Wooting", supports: (device) => WootingHidClient.isSupported(device), create: (device) => new WootingHidClient(device), score: () => 6 },
   { brand: "WALLHACK", supports: (device) => WallhackMouseHidClient.isSupported(device), create: (device) => new WallhackMouseHidClient(device), score: () => 8 },
   { brand: "WALLHACK", supports: (device) => WallhackKeyboardHidClient.isSupported(device), create: (device) => new WallhackKeyboardHidClient(device), score: () => 8 },
   { brand: "G-Wolves", supports: (device) => GWolvesHidClient.isSupported(device), create: (device) => new GWolvesHidClient(device), score: () => 7 },
+  { brand: "SteelSeries", supports: (device) => SteelSeriesRival3HidClient.isSupported(device), create: (device) => new SteelSeriesRival3HidClient(device), score: () => 6 },
+  { brand: "SteelSeries", supports: (device) => SteelSeriesAerox3HidClient.isSupported(device), create: (device) => new SteelSeriesAerox3HidClient(device), score: () => 6 },
+  { brand: "SteelSeries", supports: (device) => SteelSeriesRival3WirelessHidClient.isSupported(device), create: (device) => new SteelSeriesRival3WirelessHidClient(device), score: () => 6 },
+  { brand: "SteelSeries", supports: (device) => SteelSeriesAerox5HidClient.isSupported(device), create: (device) => new SteelSeriesAerox5HidClient(device), score: () => 6 },
+  { brand: "SteelSeries", supports: (device) => SteelSeriesAerox5WirelessHidClient.isSupported(device), create: (device) => new SteelSeriesAerox5WirelessHidClient(device), score: () => 6 },
+  { brand: "SteelSeries", supports: (device) => SteelSeriesRival650HidClient.isSupported(device), create: (device) => new SteelSeriesRival650HidClient(device), score: () => 6 },
+  { brand: "SteelSeries", supports: (device) => SteelSeriesAerox9WirelessHidClient.isSupported(device), create: (device) => new SteelSeriesAerox9WirelessHidClient(device), score: () => 6 },
+  { brand: "SteelSeries", supports: (device) => SteelSeriesRival310HidClient.isSupported(device), create: (device) => new SteelSeriesRival310HidClient(device), score: () => 6 },
+  { brand: "SteelSeries", supports: (device) => SteelSeriesPrimePlusHidClient.isSupported(device), create: (device) => new SteelSeriesPrimePlusHidClient(device), score: () => 6 },
+  { brand: "SteelSeries", supports: (device) => SteelSeriesPrimeMiniWirelessHidClient.isSupported(device), create: (device) => new SteelSeriesPrimeMiniWirelessHidClient(device), score: () => 6 },
+  { brand: "SteelSeries", supports: (device) => SteelSeriesSenseiTenHidClient.isSupported(device), create: (device) => new SteelSeriesSenseiTenHidClient(device), score: () => 6 },
+  { brand: "Glorious", supports: (device) => GloriousHidClient.isSupported(device), create: (device) => new GloriousHidClient(device), score: () => 5 },
+  { brand: "Glorious", supports: (device) => GloriousClassicHidClient.isSupported(device), create: (device) => new GloriousClassicHidClient(device), score: () => 5 },
+  { brand: "MCHOSE", supports: (device) => MchoseHidClient.isSupported(device), create: (device) => new MchoseHidClient(device), score: () => 7 },
+  { brand: "MCHOSE", supports: (device) => MchoseDockHidClient.isSupported(device), create: (device) => new MchoseDockHidClient(device), score: () => 7 },
+  { brand: "K-snake", supports: (device) => KsnakeHidClient.isSupported(device), create: (device) => new KsnakeHidClient(device), score: () => 5 },
+  { brand: "Microsoft", supports: (device) => MicrosoftHidClient.isSupported(device), create: (device) => new MicrosoftHidClient(device), score: () => 5 },
   { brand: "MSI", supports: (device) => MsiHidClient.isSupported(device), create: (device) => new MsiHidClient(device), score: () => 5 },
 ];
 
@@ -85,5 +134,6 @@ export function clientSupportScore(device: HIDDevice): number {
 export function deviceBrand(client: SupportedClient): string {
   if (client instanceof EggOp1HidClient || isEggWeClient(client)) return "Endgame Gear";
   if (client instanceof LamzuHidClient) return client.deviceBrand();
+  if (client instanceof AtkHidClient) return client.deviceBrand();
   return driverFor(client.device)?.brand ?? "Unknown";
 }

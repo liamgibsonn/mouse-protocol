@@ -13,6 +13,25 @@ export function withSoftwareId(functionId: number): number {
   return (functionId & 0xf0) | SOFTWARE_ID;
 }
 
+/**
+ * Usage page carrying HID++ over USB: a receiver, or a mouse's own wired
+ * vendor interface. Usage 1 is the short-report collection, usage 2 the long.
+ */
+export const HIDPP_USAGE_PAGE = 0xff00;
+
+/**
+ * Usage page carrying HID++ over Bluetooth. BLE devices do not expose the
+ * 0xFF00 pair at all: Logitech moves the protocol to its own vendor page
+ * (usage 0x0202) and carries long reports only, which is why an MX Master
+ * paired over Bluetooth shows a single `Vendor (0xFF43)` interface and was
+ * never offered by a 0xFF00-only picker filter.
+ *
+ * The page is Logitech's alone, so both the filter and the support check match
+ * the whole page rather than a single usage, keeping firmware that numbers the
+ * collection differently within reach.
+ */
+export const HIDPP_BLUETOOTH_USAGE_PAGE = 0xff43;
+
 /** Receiver-attached mice answer on the receiver's first pairing slot. */
 export const DEVICE_INDEX_RECEIVER = 0x01;
 /** A mouse addressed over its own USB interface answers on 0xFF. */
@@ -43,6 +62,7 @@ export const BOLT_PAIRING_SLOTS = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06] as const;
  * - 0xc08e — G903 HERO (wired)
  * - 0xc08f — G403 HERO (wired)
  * - 0xc095 — G502 X PLUS (USB cable)
+ * - 0xc098 — G502 X LIGHTSPEED (USB cable, direct-connect mode)
  * - 0xc099 — G502 X (wired)
  *
  * G Pro X Superlight generation:
@@ -61,7 +81,7 @@ export const LOGITECH_DIRECT_PRODUCT_IDS = [
   // G Pro X Superlight generation
   0xc094,
   // G502 X generation
-  0xc095, 0xc099,
+  0xc095, 0xc098, 0xc099,
 ] as const;
 
 /**

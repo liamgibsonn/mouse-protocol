@@ -68,6 +68,8 @@ import {
   WALLHACK_VENDOR_ID,
 } from "@openmouse/protocol/wallhack";
 
+import { MSI_CONFIG_USAGE, MSI_CONFIG_USAGE_PAGE, MSI_PRODUCT_ID } from "@openmouse/protocol/msi";
+
 export const VENDOR_ID = {
   pulsar: 0x3710,
   endgameGear: 0x3367,
@@ -86,6 +88,7 @@ export const VENDOR_ID = {
   moddo: 0x2fe3,
   attackShark: 0x25a7,
   attackSharkX: 0x1d57, // R1 / X11 family OEM VID (PIDs vary per firmware)
+  msi: 0x0db0,
   ninjutsoLegacy: NINJUTSO_LEGACY_VENDOR_ID,
   ninjutso: NINJUTSO_VENDOR_ID,
   zaunkoenig: ZAUNKOENIG_VENDOR_ID,
@@ -232,6 +235,19 @@ export const KEYCHRON_M6_HID_FILTERS: HIDDeviceFilter[] = [
 export const MODDO_HID_FILTERS: HIDDeviceFilter[] = [
   { vendorId: VENDOR_ID.moddo, usagePage: 0xff, usage: 0x01 },
   { vendorId: VENDOR_ID.moddo, usagePage: 0xff, usage: 0x02 },
+];
+
+// MSI Clutch GM41. The mouse exposes three collections; only the vendor
+// config interface (0xff10/0x06, confirmed on hardware) carries feature
+// reports, so pin the picker to it — filtering on product id alone lists all
+// three and lets the user pick one Windows will not accept writes on.
+export const MSI_HID_FILTERS: HIDDeviceFilter[] = [
+  {
+    vendorId: VENDOR_ID.msi,
+    productId: MSI_PRODUCT_ID,
+    usagePage: MSI_CONFIG_USAGE_PAGE,
+    usage: MSI_CONFIG_USAGE,
+  },
 ];
 
 // The X3 family's control channel is the Sonix XS-1 interface: a single
@@ -525,6 +541,7 @@ export const SUPPORTED_HID_FILTERS: HIDDeviceFilter[] = [
   ...EGG_WE_HID_FILTERS,
   ...MODDO_HID_FILTERS,
   ...WOOTING_HID_FILTERS,
+  ...MSI_HID_FILTERS,
   ...[...NINJUTSO_LEGACY_MOUSE_PRODUCT_IDS, ...NINJUTSO_LEGACY_RECEIVER_PRODUCT_IDS]
     .map((productId) => ({ vendorId: NINJUTSO_LEGACY_VENDOR_ID, productId })),
   ...[...NINJUTSO_MOUSE_PRODUCT_IDS, ...NINJUTSO_RECEIVER_PRODUCT_IDS]

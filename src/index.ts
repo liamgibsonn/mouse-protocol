@@ -7,6 +7,7 @@ export * as keychron from "./keychron/index.js";
 export * as lamzu from "./lamzu/index.js";
 export * as logitech from "./logitech/index.js";
 export * as moddo from "./moddo/index.js";
+export * as msi from "./msi/index.js";
 export * as ninjutso from "./ninjutso/index.js";
 export * as orbital from "./orbital/index.js";
 export * as pulsar from "./pulsar/index.js";

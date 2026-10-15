@@ -86,6 +86,8 @@ function collectionShapes(): HIDCollectionInfo[][] {
   // only when no legacy input/output control collection sits beside it, so
   // probe that interface feature-only.
   shapes.push([collection(0xffff, 0x01, { feature: REPORT_IDS })]);
+  // MSI Clutch GM41: vendor config collection outside the usage sweep above.
+  shapes.push([collection(0xff10, 0x06, { feature: [0] })]);
   return shapes;
 }
 

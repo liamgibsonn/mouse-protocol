@@ -8,6 +8,7 @@ import {
 } from "../asus/index.ts";
 import { ATK_COMPX_PRODUCT_IDS } from "./atk/products.ts";
 import { MICROSOFT_PRODUCT_CLASSIC, MICROSOFT_PRODUCT_PRO, MICROSOFT_VENDOR_ID, MICROSOFT_CLASSIC_USAGE_PAGE, MICROSOFT_CLASSIC_USAGE, MICROSOFT_PRO_USAGE_PAGE, MICROSOFT_PRO_USAGE } from "../microsoft/index.ts";
+import { MSI_CLUTCH_GM41_PRODUCT_ID, MSI_CONFIG_USAGE, MSI_CONFIG_USAGE_PAGE, MSI_VENDOR_ID } from "../msi/index.ts";
 import { FINALMOUSE_SLX_DONGLE_PRODUCT_IDS } from "../finalmouse/index.ts";
 import { INCOTT_PRODUCT_IDS, INCOTT_USAGE_PAGE, INCOTT_VENDOR_ID } from "../incott/index.ts";
 import { GLORIOUS_CORE2_PRODUCTS, GLORIOUS_CORE2_USAGE_PAGE, GLORIOUS_CORE2_VENDOR_ID } from "../glorious-core2/index.ts";
@@ -197,6 +198,7 @@ export const VENDOR_ID = {
   ksnakeUsb: 0xa8a4, // K-snake X11 wired
   ksnakeDongle: 0xa8a5, // K-snake X11 2.4 GHz dongle
   microsoft: MICROSOFT_VENDOR_ID,
+  msi: MSI_VENDOR_ID,
   dareu: DAREU_VENDOR_ID,
   redragon: REDRAGON_VENDOR_ID,
   // Shares SinoWealth's 0x258a with the Glorious classic line (see
@@ -812,6 +814,12 @@ export const MICROSOFT_HID_FILTERS: HIDDeviceFilter[] = [
   { vendorId: VENDOR_ID.microsoft, productId: MICROSOFT_PRODUCT_PRO, usagePage: MICROSOFT_PRO_USAGE_PAGE, usage: MICROSOFT_PRO_USAGE }, // Pro
 ];
 
+// The GM41's boot-mouse and keyboard collections reject writes, so request the
+// vendor config collection only.
+export const MSI_HID_FILTERS: HIDDeviceFilter[] = [
+  { vendorId: VENDOR_ID.msi, productId: MSI_CLUTCH_GM41_PRODUCT_ID, usagePage: MSI_CONFIG_USAGE_PAGE, usage: MSI_CONFIG_USAGE },
+];
+
 /**
  * The Incott 8K wireless mouse (and its charging-state product id) answer the
  * vendor protocol on usage page 0xFF05. Narrowed per product id and usage
@@ -990,6 +998,7 @@ export const SUPPORTED_HID_FILTERS: HIDDeviceFilter[] = [
   { vendorId: VENDOR_ID.ksnakeDongle, productId: 0x2255, usagePage: 0xff01, usage: 0x10 },
   ...AJAZZ_HID_FILTERS,
   ...MICROSOFT_HID_FILTERS,
+  ...MSI_HID_FILTERS,
   ...INCOTT_HID_FILTERS,
   ...HYPERX_HID_FILTERS,
   ...RYUNIX_HID_FILTERS,
